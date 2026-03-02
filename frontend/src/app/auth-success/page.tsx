@@ -1,9 +1,9 @@
 'use client';
 
-import { useEffect } from 'react';
+import { Suspense, useEffect } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 
-export default function AuthSuccessPage() {
+function AuthSuccessContent() {
   const router = useRouter();
   const searchParams = useSearchParams();
 
@@ -12,7 +12,6 @@ export default function AuthSuccessPage() {
 
     if (token) {
       localStorage.setItem('auth_token', token);
-      
       router.push('/dashboard');
     } else {
       router.push('/login');
@@ -26,5 +25,13 @@ export default function AuthSuccessPage() {
         <h2 className="mt-4 text-xl font-semibold text-gray-700">Completing secure login...</h2>
       </div>
     </div>
+  );
+}
+
+export default function AuthSuccessPage() {
+  return (
+    <Suspense fallback={<div className="min-h-screen items-center justify-center flex">Loading...</div>}>
+      <AuthSuccessContent />
+    </Suspense>
   );
 }
