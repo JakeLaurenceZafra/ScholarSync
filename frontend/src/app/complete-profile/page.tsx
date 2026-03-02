@@ -2,7 +2,8 @@
 
 import { Suspense, useState } from 'react';
 import { useSearchParams, useRouter } from 'next/navigation';
-import axios from 'axios';
+import { API_URL } from '@/lib/api';
+import { GraduationCap, Loader2 } from 'lucide-react';
 
 function CompleteProfileForm() {
     const searchParams = useSearchParams();
@@ -15,77 +16,66 @@ function CompleteProfileForm() {
 
     const handleSubmit = async (e: React.FormEvent) => {
         e.preventDefault();
-        if (!name.trim()) {
-            setError('Please enter your full name');
-            return;
-        }
-
+        if (!name.trim()) { setError('Please enter your full name'); return; }
         setLoading(true);
         setError('');
 
         try {
-            const response = await axios.post('http://localhost:5000/api/complete-profile', {
-                token,
-                name: name.trim()
+            const res = await fetch(`${API_URL}/api/complete-profile`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ token, name: name.trim() })
             });
-
-            if (response.data.token) {
-                // Redirect to success page as if they just logged in
-                router.push(`/auth-success?token=${response.data.token}`);
+            const data = await res.json();
+            if (res.ok && data.token) {
+                router.push(`/auth-success?token=${data.token}`);
+            } else {
+                setError(data.error || 'Failed to complete profile');
+                setLoading(false);
             }
-        } catch (err: any) {
-            setError(err.response?.data?.error || 'Failed to complete profile. Try again.');
+        } catch {
+            setError('Failed to complete profile. Try again.');
             setLoading(false);
         }
     };
 
     if (!token) {
         return (
-            <div className="flex min-h-screen items-center justify-center bg-gray-100">
-                <div className="text-center text-red-500 font-medium bg-white p-8 rounded-xl shadow-lg">
-                    Invalid or missing registration token.
+            <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-cyan-50 flex items-center justify-center">
+                <div className="text-center bg-white p-8 rounded-2xl shadow-lg">
+                    <p className="text-red-500 font-medium">Invalid or missing registration token.</p>
                 </div>
             </div>
         );
     }
 
     return (
-        <div className="flex min-h-screen items-center justify-center bg-gray-100">
-            <div className="w-full max-w-md space-y-8 rounded-xl bg-white p-10 shadow-lg">
-                <div className="text-center">
-                    <h2 className="mt-6 text-3xl font-extrabold text-gray-900">Complete Profile</h2>
-                    <p className="mt-2 text-sm text-gray-600">Please provide your full name to continue.</p>
+        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-cyan-50 flex items-center justify-center px-4">
+            <div className="w-full max-w-md bg-white rounded-2xl shadow-xl p-10">
+                <div className="text-center mb-8">
+                    <div className="w-16 h-16 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-2xl flex items-center justify-center mx-auto mb-4 shadow-lg">
+                        <GraduationCap className="w-8 h-8 text-white" />
+                    </div>
+                    <h2 className="text-2xl font-bold text-gray-800">Complete Your Profile</h2>
+                    <p className="text-gray-500 mt-2 text-sm">Enter your full name to get started</p>
                 </div>
-                <form className="mt-8 space-y-6" onSubmit={handleSubmit}>
-                    {error && <div className="text-red-500 text-sm text-center font-medium bg-red-50 p-3 rounded-md">{error}</div>}
-                    <div>
-                        <label htmlFor="name" className="block text-sm font-medium text-gray-700">
-                            Full Name
-                        </label>
-                        <div className="mt-1">
-                            <input
-                                id="name"
-                                name="name"
-                                type="text"
-                                autoComplete="name"
-                                required
-                                className="appearance-none block w-full px-4 py-3 border border-gray-300 rounded-md shadow-sm placeholder-gray-400 focus:outline-none focus:ring-indigo-500 focus:border-indigo-500 sm:text-sm"
-                                placeholder="John Doe"
-                                value={name}
-                                onChange={(e) => setName(e.target.value)}
-                            />
-                        </div>
-                    </div>
 
+                <form onSubmit={handleSubmit} className="space-y-5">
+                    {error && <div className="text-red-500 text-sm text-center bg-red-50 p-3 rounded-xl">{error}</div>}
                     <div>
-                        <button
-                            type="submit"
-                            disabled={loading}
-                            className="w-full flex justify-center py-3 px-4 border border-transparent rounded-md shadow-sm text-sm font-medium text-white bg-indigo-600 hover:bg-indigo-700 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-indigo-500 disabled:opacity-50 transition-colors"
-                        >
-                            {loading ? 'Saving...' : 'Complete Sign Up'}
-                        </button>
+                        <label htmlFor="name" className="block text-sm font-medium text-gray-700 mb-1">Full Name</label>
+                        <input
+                            id="name" type="text" autoComplete="name" required
+                            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                            placeholder="John Doe"
+                            value={name}
+                            onChange={e => setName(e.target.value)}
+                        />
                     </div>
+                    <button type="submit" disabled={loading}
+                        className="w-full py-3 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl font-medium hover:shadow-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2">
+                        {loading ? <><Loader2 className="w-4 h-4 animate-spin" /> Saving...</> : 'Complete Sign Up'}
+                    </button>
                 </form>
             </div>
         </div>
@@ -94,7 +84,11 @@ function CompleteProfileForm() {
 
 export default function CompleteProfilePage() {
     return (
-        <Suspense fallback={<div className="min-h-screen bg-gray-100 flex items-center justify-center">Loading...</div>}>
+        <Suspense fallback={
+            <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-cyan-50 flex items-center justify-center">
+                <div className="animate-spin rounded-full h-10 w-10 border-4 border-blue-500 border-t-transparent" />
+            </div>
+        }>
             <CompleteProfileForm />
         </Suspense>
     );

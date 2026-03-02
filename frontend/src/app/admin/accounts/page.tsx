@@ -3,7 +3,13 @@
 import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import SidebarLayout from '@/components/SidebarLayout';
-import axios from 'axios';
+import { API_URL } from '@/lib/api';
+import {
+    Users,
+    Trash2,
+    Shield,
+    Loader2
+} from 'lucide-react';
 
 type Account = {
     account_id: string;
@@ -16,7 +22,13 @@ export default function AdminAccountsPage() {
     const [accounts, setAccounts] = useState<Account[]>([]);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
     const router = useRouter();
+
+    const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 3000);
+    };
 
     useEffect(() => {
         fetchAccounts();
@@ -25,21 +37,15 @@ export default function AdminAccountsPage() {
     const fetchAccounts = async () => {
         try {
             const token = localStorage.getItem('auth_token');
-            if (!token) {
-                router.push('/login');
-                return;
-            }
-
-            const res = await axios.get('http://localhost:5000/api/accounts', {
+            if (!token) { router.push('/login'); return; }
+            const res = await fetch(`${API_URL}/api/accounts`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            setAccounts(res.data);
-        } catch (err: any) {
-            if (err.response?.status === 403) {
-                router.push('/dashboard'); // Admins only
-            } else {
-                setError(err.response?.data?.error || "Failed to load accounts.");
-            }
+            if (res.status === 403) { router.push('/dashboard'); return; }
+            if (res.ok) setAccounts(await res.json());
+            else setError('Failed to load accounts');
+        } catch (err) {
+            setError('Failed to load accounts');
         } finally {
             setLoading(false);
         }
@@ -48,68 +54,89 @@ export default function AdminAccountsPage() {
     const handleRoleChange = async (accountId: string, newRole: string) => {
         try {
             const token = localStorage.getItem('auth_token');
-            await axios.put(`http://localhost:5000/api/accounts/${accountId}/role`,
-                { role: newRole },
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-
-            // Update local state to reflect the change visually
-            setAccounts(prev => prev.map(acc =>
-                acc.account_id === accountId ? { ...acc, accountRole: newRole } : acc
-            ));
-        } catch (err) {
-            alert("Failed to update role. Ensure you have Admin privileges.");
-        }
+            const res = await fetch(`${API_URL}/api/accounts/${accountId}/role`, {
+                method: 'PUT',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ role: newRole })
+            });
+            if (res.ok) {
+                setAccounts(prev => prev.map(acc => acc.account_id === accountId ? { ...acc, accountRole: newRole } : acc));
+                showToast('Role updated!');
+            } else {
+                showToast('Failed to update role', 'error');
+            }
+        } catch { showToast('Failed to update role', 'error'); }
     };
 
     const handleDelete = async (accountId: string) => {
-        if (!window.confirm("Are you sure you want to permanently delete this account?")) return;
-
+        if (!window.confirm('Permanently delete this account?')) return;
         try {
             const token = localStorage.getItem('auth_token');
-            await axios.delete(`http://localhost:5000/api/accounts/${accountId}`, {
+            const res = await fetch(`${API_URL}/api/accounts/${accountId}`, {
+                method: 'DELETE',
                 headers: { Authorization: `Bearer ${token}` }
             });
-
-            // Remove from UI
-            setAccounts(prev => prev.filter(acc => acc.account_id !== accountId));
-        } catch (err) {
-            alert("Failed to delete account.");
-        }
+            if (res.ok) {
+                setAccounts(prev => prev.filter(acc => acc.account_id !== accountId));
+                showToast('Account deleted');
+            } else {
+                showToast('Failed to delete account', 'error');
+            }
+        } catch { showToast('Failed to delete account', 'error'); }
     };
 
-    if (loading) return <div className="min-h-screen bg-white"></div>;
+    if (loading) {
+        return (
+            <SidebarLayout>
+                <div className="flex items-center justify-center h-[60vh]">
+                    <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent" />
+                </div>
+            </SidebarLayout>
+        );
+    }
 
     return (
         <SidebarLayout>
-            <main className="p-8 max-w-7xl mx-auto h-full">
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
                 <div className="mb-8">
-                    <h1 className="text-3xl font-bold text-gray-800">Account Management</h1>
-                    <p className="mt-2 text-gray-600">Admin view to control user roles and platform access.</p>
+                    <div className="flex items-center gap-3 mb-2">
+                        <div className="p-2 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl shadow-md">
+                            <Shield className="w-6 h-6 text-white" />
+                        </div>
+                        <h1 className="text-4xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">Account Management</h1>
+                    </div>
+                    <p className="text-gray-500 ml-14">Manage user roles and platform access</p>
                 </div>
 
-                {error && <div className="mb-4 text-red-600 font-medium">{error}</div>}
+                {error && <div className="mb-4 text-red-600 font-medium text-sm bg-red-50 p-3 rounded-xl">{error}</div>}
 
-                <div className="bg-white border border-gray-200 rounded-xl shadow-sm overflow-hidden">
-                    <table className="w-full text-left border-collapse">
+                <div className="glass-card overflow-hidden">
+                    <table className="w-full text-left">
                         <thead>
-                            <tr className="bg-gray-100 border-b border-gray-200">
-                                <th className="p-4 font-semibold text-gray-700">Full Name</th>
-                                <th className="p-4 font-semibold text-gray-700">Email</th>
-                                <th className="p-4 font-semibold text-gray-700">Role</th>
-                                <th className="p-4 font-semibold text-gray-700 text-right">Actions</th>
+                            <tr className="border-b border-gray-200 bg-gray-50/50">
+                                <th className="p-4 font-semibold text-gray-700 text-sm">User</th>
+                                <th className="p-4 font-semibold text-gray-700 text-sm">Email</th>
+                                <th className="p-4 font-semibold text-gray-700 text-sm">Role</th>
+                                <th className="p-4 font-semibold text-gray-700 text-sm text-right">Actions</th>
                             </tr>
                         </thead>
                         <tbody>
                             {accounts.map((acc, idx) => (
-                                <tr key={acc.account_id} className={`border-b border-gray-100 ${idx % 2 === 0 ? 'bg-white' : 'bg-gray-50'}`}>
-                                    <td className="p-4 font-medium text-gray-900">{acc.accountName}</td>
-                                    <td className="p-4 text-gray-600">{acc.accountEmail}</td>
+                                <tr key={acc.account_id} className={`border-b border-gray-100 hover:bg-blue-50/30 transition-colors ${idx % 2 === 0 ? '' : 'bg-gray-50/30'}`}>
+                                    <td className="p-4">
+                                        <div className="flex items-center gap-3">
+                                            <div className="w-9 h-9 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-full flex items-center justify-center text-white font-bold text-xs">
+                                                {acc.accountName?.charAt(0).toUpperCase()}
+                                            </div>
+                                            <span className="font-medium text-gray-800 text-sm">{acc.accountName}</span>
+                                        </div>
+                                    </td>
+                                    <td className="p-4 text-gray-500 text-sm">{acc.accountEmail}</td>
                                     <td className="p-4">
                                         <select
                                             value={acc.accountRole || 'Student'}
-                                            onChange={(e) => handleRoleChange(acc.account_id, e.target.value)}
-                                            className="border border-gray-300 rounded px-2 py-1 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
+                                            onChange={e => handleRoleChange(acc.account_id, e.target.value)}
+                                            className="border border-gray-200 rounded-lg px-3 py-1.5 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500"
                                         >
                                             <option value="Student">Student</option>
                                             <option value="Advisers">Advisers</option>
@@ -117,24 +144,35 @@ export default function AdminAccountsPage() {
                                         </select>
                                     </td>
                                     <td className="p-4 text-right">
-                                        <button
-                                            onClick={() => handleDelete(acc.account_id)}
-                                            className="text-white bg-red-500 hover:bg-red-600 px-3 py-1.5 rounded text-sm font-medium transition-colors"
+                                        <button onClick={() => handleDelete(acc.account_id)}
+                                            className="p-2 text-red-500 hover:bg-red-50 rounded-lg transition-colors"
+                                            title="Delete account"
                                         >
-                                            Delete
+                                            <Trash2 className="w-4 h-4" />
                                         </button>
                                     </td>
                                 </tr>
                             ))}
                             {accounts.length === 0 && (
                                 <tr>
-                                    <td colSpan={4} className="p-8 text-center text-gray-500">No accounts found.</td>
+                                    <td colSpan={4} className="p-12 text-center text-gray-400">
+                                        <Users className="w-10 h-10 mx-auto mb-3 text-gray-300" />
+                                        <p>No accounts found</p>
+                                    </td>
                                 </tr>
                             )}
                         </tbody>
                     </table>
                 </div>
-            </main>
+            </div>
+
+            {/* Toast */}
+            {toast && (
+                <div className={`fixed bottom-6 right-6 z-[200] px-5 py-3 rounded-xl shadow-lg text-sm font-medium text-white animate-slide-up ${toast.type === 'success' ? 'bg-gradient-to-r from-green-500 to-emerald-500' : 'bg-gradient-to-r from-red-500 to-rose-500'
+                    }`}>
+                    {toast.message}
+                </div>
+            )}
         </SidebarLayout>
     );
 }

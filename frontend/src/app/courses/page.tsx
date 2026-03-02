@@ -4,8 +4,19 @@ import { useEffect, useState } from 'react';
 import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import SidebarLayout from '@/components/SidebarLayout';
-import axios from 'axios';
+import { API_URL } from '@/lib/api';
 import { jwtDecode } from 'jwt-decode';
+import {
+    BookOpen,
+    Plus,
+    Search,
+    Users,
+    Copy,
+    CheckCircle,
+    X,
+    KeyRound,
+    Loader2
+} from 'lucide-react';
 
 type Course = {
     id?: number;
@@ -24,243 +35,227 @@ export default function CoursesPage() {
     const [loading, setLoading] = useState(true);
     const [canCreate, setCanCreate] = useState(false);
 
-    // Modal state
     const [isModalOpen, setIsModalOpen] = useState(false);
     const [successKey, setSuccessKey] = useState<string | null>(null);
+    const [submitting, setSubmitting] = useState(false);
 
-    // Form state
     const [enrollKey, setEnrollKey] = useState('');
+    const [enrolling, setEnrolling] = useState(false);
     const [searchQuery, setSearchQuery] = useState('');
     const [courseName, setCourseName] = useState('');
     const [courseCode, setCourseCode] = useState('');
     const [courseSection, setCourseSection] = useState('');
     const [courseTerm, setCourseTerm] = useState('First Semester');
 
+    const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+
     const router = useRouter();
+
+    const showToast = (message: string, type: 'success' | 'error' = 'success') => {
+        setToast({ message, type });
+        setTimeout(() => setToast(null), 3000);
+    };
 
     useEffect(() => {
         const token = localStorage.getItem('auth_token');
-        if (!token) {
-            router.push('/login');
-            return;
-        }
-
+        if (!token) { router.push('/login'); return; }
         try {
             const decoded: any = jwtDecode(token);
             setUser(decoded);
-            if (decoded.role === 'Admin' || decoded.role === 'Advisers') {
-                setCanCreate(true);
-            }
+            if (decoded.role === 'Admin' || decoded.role === 'Advisers') setCanCreate(true);
             fetchCourses(token);
-        } catch (err) {
-            router.push('/login');
-        }
+        } catch (err) { router.push('/login'); }
     }, [router]);
 
     const fetchCourses = async (token: string) => {
         try {
-            const res = await axios.get('http://localhost:5000/api/courses', {
+            const res = await fetch(`${API_URL}/api/courses`, {
                 headers: { Authorization: `Bearer ${token}` }
             });
-            setCourses(res.data);
-        } catch (err) {
-            console.error("Failed to load courses");
-        } finally {
-            setLoading(false);
-        }
+            if (res.ok) setCourses(await res.json());
+        } catch (err) { console.error('Failed to load courses'); }
+        finally { setLoading(false); }
     };
 
     const handleCreateCourse = async (e: React.FormEvent) => {
         e.preventDefault();
+        setSubmitting(true);
         try {
             const token = localStorage.getItem('auth_token');
-            const res = await axios.post('http://localhost:5000/api/courses', {
-                courseName,
-                courseCode,
-                courseSection,
-                courseTerm
-            }, {
-                headers: { Authorization: `Bearer ${token}` }
+            const res = await fetch(`${API_URL}/api/courses`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ courseName, courseCode, courseSection, courseTerm })
             });
-
-            // Add to UI immediately
-            setCourses([res.data, ...courses]);
-            // Show success logic instead of closing immediately
-            setSuccessKey(res.data.courseKey);
-        } catch (err: any) {
-            console.error("Creation Error:", err.response?.data);
-            alert(`Error creating course: ${err.response?.data?.error || err.message}`);
-        }
+            if (res.ok) {
+                const data = await res.json();
+                setCourses([data, ...courses]);
+                setSuccessKey(data.courseKey);
+            } else {
+                const err = await res.json();
+                showToast(err.error || 'Failed to create course', 'error');
+            }
+        } catch (err) { showToast('Failed to create course', 'error'); }
+        finally { setSubmitting(false); }
     };
 
     const resetModal = () => {
         setIsModalOpen(false);
         setSuccessKey(null);
-        setCourseName('');
-        setCourseCode('');
-        setCourseSection('');
-        setCourseTerm('First Semester');
+        setCourseName(''); setCourseCode(''); setCourseSection(''); setCourseTerm('First Semester');
     };
 
     const handleEnroll = async () => {
         if (!enrollKey) return;
-
+        setEnrolling(true);
         try {
             const token = localStorage.getItem('auth_token');
-            await axios.post('http://localhost:5000/api/enroll',
-                { courseKey: enrollKey },
-                { headers: { Authorization: `Bearer ${token}` } }
-            );
-
-            alert("Successfully enrolled!");
-            setEnrollKey('');
-            // Reload courses silently
-            fetchCourses(token!);
-        } catch (err: any) {
-            alert(err.response?.data?.error || "Failed to enroll. Please check your key.");
-        }
+            const res = await fetch(`${API_URL}/api/enroll`, {
+                method: 'POST',
+                headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
+                body: JSON.stringify({ courseKey: enrollKey })
+            });
+            if (res.ok) {
+                showToast('Successfully enrolled!');
+                setEnrollKey('');
+                fetchCourses(token!);
+            } else {
+                const err = await res.json();
+                showToast(err.error || 'Failed to enroll', 'error');
+            }
+        } catch (err) { showToast('Failed to enroll. Check your key.', 'error'); }
+        finally { setEnrolling(false); }
     };
 
-    const filteredCourses = courses.filter(course =>
-        course.courseName.toLowerCase().includes(searchQuery.toLowerCase()) ||
-        course.courseCode.toLowerCase().includes(searchQuery.toLowerCase())
+    const filteredCourses = courses.filter(c =>
+        c.courseName.toLowerCase().includes(searchQuery.toLowerCase()) ||
+        c.courseCode.toLowerCase().includes(searchQuery.toLowerCase())
     );
 
-    if (loading) return <div className="min-h-screen bg-white"></div>;
+    if (loading) {
+        return (
+            <SidebarLayout>
+                <div className="flex items-center justify-center h-[60vh]">
+                    <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent" />
+                </div>
+            </SidebarLayout>
+        );
+    }
 
     const isAdmin = user?.role === 'Admin';
 
     return (
         <SidebarLayout>
-            <div className="p-8 max-w-7xl mx-auto h-full flex flex-col">
-                <div>
-                    <h1 className="text-4xl font-[family-name:var(--font-inter)] tracking-wide font-medium text-[#4FB6DF] mb-4">Courses</h1>
+            <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+                {/* Header */}
+                <div className="mb-8">
+                    <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">Courses</h1>
+                    <p className="text-gray-600 mt-2">{isAdmin ? 'Manage all courses' : canCreate ? 'Your managed courses' : 'Your enrolled courses'}</p>
                 </div>
 
-                {/* Main Blue Container */}
-                <div className="flex-1 bg-[#4FB6DF] rounded-none p-6 min-h-[400px]">
-                    {/* Top Controls Row */}
-                    <div className="flex justify-between items-center mb-6">
-                        {/* Search Bar (Left) */}
-                        <div className="w-64">
-                            <input
-                                type="text"
-                                placeholder="Search..."
-                                value={searchQuery}
-                                onChange={(e) => setSearchQuery(e.target.value)}
-                                className="w-full text-sm font-medium bg-white rounded-full px-4 py-2 focus:outline-none focus:ring-2 focus:ring-white/50 text-[#4FB6DF] placeholder-[#4FB6DF]/60 shadow-sm"
-                            />
-                        </div>
-
-                        {/* Control Buttons (Right) */}
-                        <div className="flex items-center gap-3">
-                            {canCreate && (
-                                <button
-                                    onClick={() => setIsModalOpen(true)}
-                                    className="bg-white hover:bg-gray-50 text-[#4FB6DF] font-bold text-sm px-6 py-1.5 rounded-full shadow-sm transition-colors"
-                                >
-                                    Create
-                                </button>
-                            )}
-
-                            {/* Only show Enroll logic if NOT an Admin */}
-                            {!isAdmin && (
-                                <>
-                                    <button
-                                        onClick={handleEnroll}
-                                        className="bg-white hover:bg-gray-50 text-[#4FB6DF] font-bold text-sm px-6 py-1.5 rounded-full shadow-sm transition-colors"
-                                    >
-                                        Enroll
-                                    </button>
-                                    <input
-                                        type="text"
-                                        value={enrollKey}
-                                        onChange={(e) => setEnrollKey(e.target.value)}
-                                        placeholder="Enter Course Code..."
-                                        className="border-none rounded-full px-4 py-1.5 focus:outline-none focus:ring-2 focus:ring-white/50 text-[#4FB6DF] placeholder-[#4FB6DF]/60 shadow-sm text-sm"
-                                    />
-                                </>
-                            )}
-                        </div>
+                {/* Controls */}
+                <div className="flex flex-wrap items-center gap-4 mb-6">
+                    <div className="relative flex-1 max-w-sm">
+                        <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+                        <input
+                            type="text"
+                            placeholder="Search courses..."
+                            value={searchQuery}
+                            onChange={e => setSearchQuery(e.target.value)}
+                            className="w-full pl-10 pr-4 py-2.5 bg-white border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
+                        />
                     </div>
 
-                    {/* Enrolled Courses List Container with Custom Scrollbar bounds mockup */}
-                    <div className="h-[calc(100vh-280px)] overflow-y-auto pr-2 custom-scrollbar">
-                        {filteredCourses.length > 0 ? (
-                            <div className="flex flex-col space-y-3 w-full">
-                                {filteredCourses.map((course, idx) => (
-                                    <Link href={`/courses/${course.id}`} key={idx} className="block w-full">
-                                        <div className="bg-white rounded-none p-4 hover:shadow-md transition-shadow w-full flex flex-col justify-start cursor-pointer border border-transparent hover:border-blue-200">
-                                            {/* Stacked Typography exactly matching Mockup alignment */}
-                                            <div className="flex justify-between items-start">
-                                                <div className="flex flex-col">
-                                                    <h3 className="font-medium text-[1.40rem] text-[#4FB6DF] leading-tight tracking-wide font-[family-name:var(--font-inter)]">
-                                                        {course.courseName} - {course.courseSection}
-                                                    </h3>
-                                                    <p className="text-[#4FB6DF] text-[0.80rem] font-medium mt-0.5">
-                                                        {course.courseCode} - {course.courseTerm}
-                                                    </p>
-
-                                                    {/* Push Adviser string downwards creating gap identical to design */}
-                                                    <p className="text-[#4FB6DF] text-[0.60rem] font-bold mt-4 uppercase">
-                                                        {course.courseAdviser}
-                                                    </p>
-                                                </div>
-
-                                                {/* Adjusted absolute positioning preventing vector clipping on smaller resolutions */}
-                                                <div className="flex flex-col items-end pt-1">
-                                                    <button
-                                                        className="hover:scale-110 transition-transform active:scale-95 flex-shrink-0"
-                                                        onClick={(e) => {
-                                                            e.preventDefault();
-                                                            e.stopPropagation();
-                                                            navigator.clipboard.writeText(course.courseKey);
-                                                            alert("Course Key Copied!");
-                                                        }}
-                                                        title="Copy Course Key"
-                                                    >
-                                                        <img src="/CopyIcon.png" alt="Copy Key" className="w-[1.2rem] h-[1.2rem] opacity-60 hover:opacity-100 transition-opacity" style={{ filter: 'invert(53%) sepia(43%) saturate(541%) hue-rotate(159deg) brightness(96%) contrast(92%)' }} />
-                                                    </button>
-                                                </div>
-                                            </div>
-                                        </div>
-                                    </Link>
-                                ))}
-                            </div>
-                        ) : (
-                            <div className="flex flex-col items-center justify-center h-full text-white/80">
-                                <p className="text-lg font-medium">No courses found matching criteria.</p>
+                    <div className="flex items-center gap-3">
+                        {canCreate && (
+                            <button onClick={() => setIsModalOpen(true)} className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl hover:shadow-lg transition-all text-sm font-medium">
+                                <Plus className="w-4 h-4" /> Create Course
+                            </button>
+                        )}
+                        {!isAdmin && (
+                            <div className="flex items-center gap-2">
+                                <input
+                                    type="text"
+                                    value={enrollKey}
+                                    onChange={e => setEnrollKey(e.target.value)}
+                                    placeholder="Course key..."
+                                    className="px-4 py-2.5 bg-white border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm w-40"
+                                />
+                                <button
+                                    onClick={handleEnroll}
+                                    disabled={enrolling || !enrollKey}
+                                    className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl hover:shadow-lg transition-all text-sm font-medium disabled:opacity-50"
+                                >
+                                    {enrolling ? <Loader2 className="w-4 h-4 animate-spin" /> : <KeyRound className="w-4 h-4" />}
+                                    Enroll
+                                </button>
                             </div>
                         )}
                     </div>
                 </div>
+
+                {/* Courses Grid */}
+                {filteredCourses.length > 0 ? (
+                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                        {filteredCourses.map((course, idx) => (
+                            <Link href={`/courses/${course.id}`} key={idx} className="glass-card p-5 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 group">
+                                <div className="flex items-start justify-between mb-4">
+                                    <div className="p-2.5 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-md">
+                                        <BookOpen className="w-5 h-5 text-white" />
+                                    </div>
+                                    <button
+                                        onClick={e => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(course.courseKey); showToast('Course key copied!'); }}
+                                        className="p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                        title="Copy course key"
+                                    >
+                                        <Copy className="w-4 h-4" />
+                                    </button>
+                                </div>
+
+                                <h3 className="font-bold text-gray-800 text-lg group-hover:text-blue-600 transition-colors mb-1">
+                                    {course.courseName}
+                                </h3>
+                                <p className="text-sm text-gray-500 mb-1">{course.courseCode} · {course.courseSection}</p>
+                                <p className="text-xs text-gray-400 mb-4">{course.courseTerm}</p>
+
+                                <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                                    <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                                        <Users className="w-4 h-4" />
+                                        <span>{course.courseAmount || 0} students</span>
+                                    </div>
+                                    <span className="text-xs text-gray-400 uppercase font-medium tracking-wider">{course.courseAdviser?.split('@')[0]}</span>
+                                </div>
+                            </Link>
+                        ))}
+                    </div>
+                ) : (
+                    <div className="glass-card p-12 text-center">
+                        <BookOpen className="w-16 h-16 text-gray-300 mx-auto mb-4" />
+                        <h3 className="text-xl font-semibold text-gray-700 mb-2">No courses found</h3>
+                        <p className="text-gray-500">{searchQuery ? 'Try a different search term' : canCreate ? 'Create your first course' : 'Enroll using a course key'}</p>
+                    </div>
+                )}
             </div>
 
-            {/* Creation Modal Overlay */}
+            {/* Create Course Modal */}
             {isModalOpen && (
-                <div className="fixed inset-0 bg-black bg-opacity-50 z-50 flex items-center justify-center backdrop-blur-sm">
-                    <div className="bg-white rounded-xl shadow-2xl p-8 max-w-md w-full mx-4 relative animate-in fade-in zoom-in-95 duration-200">
-                        <button
-                            onClick={resetModal}
-                            className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 transition-colors"
-                        >
-                            ✕
+                <div className="fixed inset-0 bg-black/40 backdrop-blur-sm z-50 flex items-center justify-center p-4">
+                    <div className="bg-white rounded-2xl shadow-2xl max-w-md w-full p-8 relative animate-fade-in">
+                        <button onClick={resetModal} className="absolute top-4 right-4 text-gray-400 hover:text-gray-600 p-1 rounded-lg hover:bg-gray-100">
+                            <X className="w-5 h-5" />
                         </button>
 
                         {successKey ? (
-                            <div className="text-center py-6">
-                                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4 text-green-500">
-                                    <svg className="w-8 h-8" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path strokeLinecap="round" strokeLinejoin="round" strokeWidth="2" d="M5 13l4 4L19 7"></path></svg>
+                            <div className="text-center py-4">
+                                <div className="w-16 h-16 bg-green-100 rounded-full flex items-center justify-center mx-auto mb-4">
+                                    <CheckCircle className="w-8 h-8 text-green-500" />
                                 </div>
                                 <h2 className="text-2xl font-bold text-gray-800 mb-2">Course Created!</h2>
-                                <p className="text-gray-600 mb-6">Here is your unique course registration key. Share this with your students.</p>
-                                <div className="bg-gray-50 border-2 border-dashed border-gray-300 rounded-lg p-4 mb-6">
-                                    <span className="text-3xl font-mono font-bold tracking-widest text-indigo-600">{successKey}</span>
+                                <p className="text-gray-500 mb-6">Share this key with your students:</p>
+                                <div className="bg-gray-50 border-2 border-dashed border-gray-300 rounded-xl p-4 mb-6">
+                                    <span className="text-3xl font-mono font-bold tracking-widest bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">{successKey}</span>
                                 </div>
-                                <button
-                                    onClick={resetModal}
-                                    className="w-full bg-gray-900 hover:bg-black text-white py-2 rounded font-medium transition-colors"
-                                >
+                                <button onClick={resetModal} className="w-full py-3 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl font-medium hover:shadow-lg transition-all">
                                     Done
                                 </button>
                             </div>
@@ -270,61 +265,49 @@ export default function CoursesPage() {
                                 <form onSubmit={handleCreateCourse} className="space-y-4">
                                     <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">Course Name</label>
-                                        <input
-                                            type="text"
-                                            required
-                                            value={courseName}
-                                            onChange={e => setCourseName(e.target.value)}
-                                            className="w-full border border-[#d1d1d1] rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                            placeholder="e.g. Introduction to Programming"
-                                        />
+                                        <input type="text" required value={courseName} onChange={e => setCourseName(e.target.value)}
+                                            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                            placeholder="e.g. Introduction to Programming" />
                                     </div>
                                     <div className="grid grid-cols-2 gap-4">
                                         <div>
                                             <label className="block text-sm font-medium text-gray-700 mb-1">Course Code</label>
-                                            <input
-                                                type="text"
-                                                required
-                                                value={courseCode}
-                                                onChange={e => setCourseCode(e.target.value)}
-                                                className="w-full border border-[#d1d1d1] rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                placeholder="e.g. CS101"
-                                            />
+                                            <input type="text" required value={courseCode} onChange={e => setCourseCode(e.target.value)}
+                                                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="e.g. CS101" />
                                         </div>
                                         <div>
                                             <label className="block text-sm font-medium text-gray-700 mb-1">Section</label>
-                                            <input
-                                                type="text"
-                                                required
-                                                value={courseSection}
-                                                onChange={e => setCourseSection(e.target.value)}
-                                                className="w-full border border-[#d1d1d1] rounded px-3 py-2 focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                                placeholder="e.g. A"
-                                            />
+                                            <input type="text" required value={courseSection} onChange={e => setCourseSection(e.target.value)}
+                                                className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                                                placeholder="e.g. A" />
                                         </div>
                                     </div>
                                     <div>
                                         <label className="block text-sm font-medium text-gray-700 mb-1">Term</label>
-                                        <select
-                                            value={courseTerm}
-                                            onChange={e => setCourseTerm(e.target.value)}
-                                            className="w-full border border-[#d1d1d1] rounded px-3 py-2 bg-white focus:outline-none focus:ring-2 focus:ring-indigo-500"
-                                        >
-                                            <option value="First Semester">First Semester</option>
-                                            <option value="Second Semester">Second Semester</option>
-                                            <option value="Summer">Summer</option>
+                                        <select value={courseTerm} onChange={e => setCourseTerm(e.target.value)}
+                                            className="w-full border border-gray-200 rounded-xl px-4 py-3 text-sm bg-white focus:outline-none focus:ring-2 focus:ring-blue-500">
+                                            <option>First Semester</option>
+                                            <option>Second Semester</option>
+                                            <option>Summer</option>
                                         </select>
                                     </div>
-                                    <button
-                                        type="submit"
-                                        className="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-medium py-2 rounded mt-6 transition-colors"
-                                    >
-                                        Generate Course Option
+                                    <button type="submit" disabled={submitting}
+                                        className="w-full py-3 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl font-medium hover:shadow-lg transition-all disabled:opacity-50 flex items-center justify-center gap-2 mt-4">
+                                        {submitting ? <><Loader2 className="w-4 h-4 animate-spin" /> Creating...</> : 'Create Course'}
                                     </button>
                                 </form>
                             </>
                         )}
                     </div>
+                </div>
+            )}
+
+            {/* Toast */}
+            {toast && (
+                <div className={`fixed bottom-6 right-6 z-[200] px-5 py-3 rounded-xl shadow-lg text-sm font-medium text-white animate-slide-up ${toast.type === 'success' ? 'bg-gradient-to-r from-green-500 to-emerald-500' : 'bg-gradient-to-r from-red-500 to-rose-500'
+                    }`}>
+                    {toast.message}
                 </div>
             )}
         </SidebarLayout>
