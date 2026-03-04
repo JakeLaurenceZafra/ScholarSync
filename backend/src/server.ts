@@ -16,7 +16,7 @@ const pool = new Pool({ connectionString: process.env.SKYFLOW_DATABASE_URL });
 const app = express();
 
 app.use(cors({
-  origin: 'http://localhost:3000',
+  origin: ['http://localhost:3000', 'http://localhost:3002'],
   credentials: true
 }));
 app.use(express.json());
@@ -90,7 +90,7 @@ app.get('/auth/google/callback',
       { expiresIn: '24h' }
     );
 
-    res.redirect(`http://localhost:3000/auth-success?token=${token}`);
+    res.redirect(`http://localhost:3002/auth-success?token=${token}`);
   }
 );
 
@@ -256,6 +256,52 @@ app.get('/api/courses/:id/members', async (req, res) => {
     return res.sendStatus(403);
   }
 });
+// ── Team Group Comments (shared with SkyFlow's Discussion) ──
+app.get('/api/team-groups/:id/comments', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const { rows } = await pool.query(
+      `SELECT id, user_name, content, created_at FROM team_comments
+       WHERE team_group_id = $1 ORDER BY created_at ASC`,
+      [req.params.id]
+    );
+    return res.json(rows);
+  } catch (err) {
+    return res.sendStatus(403);
+  }
+});
+
+app.post('/api/team-groups/:id/comments', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    const decoded = jwt.verify(token, process.env.JWT_SECRET || "test") as any;
+    const { content } = req.body;
+    if (!content || !content.trim()) return res.status(400).json({ error: 'Comment cannot be empty' });
+
+    // Get user name from ss_account
+    const userResult = await pool.query(
+      'SELECT "accountName", "accountEmail" FROM ss_account WHERE account_id = $1',
+      [decoded.id]
+    );
+    const userName = userResult.rows[0]?.accountName || decoded.email || 'Unknown';
+
+    const { rows } = await pool.query(
+      `INSERT INTO team_comments (team_group_id, user_id, user_name, content)
+       VALUES ($1, $2, $3, $4) RETURNING id, user_name, content, created_at`,
+      [req.params.id, null, userName, content.trim()]
+    );
+    return res.json(rows[0]);
+  } catch (err: any) {
+    return res.status(500).json({ error: err.message });
+  }
+});
 
 app.get('/api/courses/:id/groupings', async (req, res) => {
   const authHeader = req.headers.authorization;
@@ -264,7 +310,12 @@ app.get('/api/courses/:id/groupings', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows } = await pool.query('SELECT * FROM ss_groupings WHERE "courseID" = $1 ORDER BY "groupName"', [req.params.id]);
+    const { rows } = await pool.query(
+      `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project, 
+              consultation_dates, comments, grade, course_id as "courseID"
+       FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
+      [req.params.id]
+    );
     return res.json(rows);
   } catch (err) {
     return res.sendStatus(403);
@@ -279,15 +330,27 @@ app.get('/api/courses/:id/group-members', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows } = await pool.query(
-      'SELECT * FROM ss_groupings WHERE "courseID" = $1 ORDER BY "groupName"',
+    const { rows: groups } = await pool.query(
+      `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project,
+              consultation_dates, comments, grade, course_id as "courseID"
+       FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
       [req.params.id]
     );
-    // members_json is already JSONB, return it as 'members'
-    const enriched = rows.map(g => ({
-      ...g,
-      members: g.members_json || [],
+
+    // Fetch members for each group
+    const enriched = await Promise.all(groups.map(async (g: any) => {
+      const { rows: members } = await pool.query(
+        `SELECT member_number, name, email, is_leader FROM team_group_members
+         WHERE team_group_id = $1 ORDER BY member_number`,
+        [g.id]
+      );
+      return {
+        ...g,
+        groupMembers: members.length,
+        members,
+      };
     }));
+
     return res.json(enriched);
   } catch (err: any) {
     return res.status(500).json({ error: err.message });
@@ -516,23 +579,53 @@ app.post('/api/import-from-sheet', async (req, res) => {
           courseId = newCourse.rows[0].id;
         }
 
-        // 2. Clear old groupings for this course
-        await client.query('DELETE FROM ss_groupings WHERE "courseID" = $1', [courseId]);
-
-        // 3. Insert new groupings with full member data
-        for (const [groupName, groupData] of Object.entries(groups)) {
-          const membersJson = JSON.stringify(groupData.members.map((m, i) => ({
-            member_number: m.memberNum || (i + 1),
-            name: m.fullName,
-            email: m.email,
-            is_leader: (m.memberNum || (i + 1)) === 1,
-          })));
-
-          await client.query(
-            `INSERT INTO ss_groupings ("groupName", "groupMembers", "courseID", members_json, adviser, proposed_project)
-             VALUES ($1, $2, $3, $4, $5, $6)`,
-            [groupName, groupData.members.length, courseId, membersJson, groupData.adviser, groupData.proposedProject]
+        // 2. Get the ScholarSync organization for team_groups
+        let orgResult = await client.query("SELECT id FROM organizations WHERE name = 'ScholarSync' LIMIT 1");
+        if (orgResult.rows.length === 0) {
+          orgResult = await client.query(
+            `INSERT INTO organizations (name, description, domain)
+             VALUES ('ScholarSync', 'Academic collaboration workspace synced from ScholarSync', 'scholarsync.local')
+             RETURNING id`
           );
+        }
+        const orgId = orgResult.rows[0]?.id;
+
+        // 3. Clear old team_groups for this course
+        const oldTeams = await client.query('SELECT id FROM team_groups WHERE course_id = $1', [courseId]);
+        for (const t of oldTeams.rows) {
+          await client.query('DELETE FROM team_group_members WHERE team_group_id = $1', [t.id]);
+        }
+        await client.query('DELETE FROM team_groups WHERE course_id = $1', [courseId]);
+
+        // 4. Insert new groups into team_groups + team_group_members
+        let teamNumber = 1;
+        for (const [groupName, groupData] of Object.entries(groups)) {
+          const teamRes = await client.query(
+            `INSERT INTO team_groups (organization_id, team_code, team_number, name, description, adviser_name, course_id, proposed_project, status)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active') RETURNING id`,
+            [
+              orgId,
+              parsed.courseKey,
+              teamNumber,
+              groupName,
+              `${parsed.courseName} | ${parsed.courseTerm}`,
+              groupData.adviser || null,
+              courseId,
+              groupData.proposedProject || null,
+            ]
+          );
+          const teamId = teamRes.rows[0].id;
+
+          // Insert members into team_group_members
+          let memberNum = 1;
+          for (const member of groupData.members) {
+            await client.query(
+              `INSERT INTO team_group_members (team_group_id, member_number, name, email, is_leader)
+               VALUES ($1, $2, $3, $4, $5)`,
+              [teamId, member.memberNum || memberNum, member.fullName, member.email, (member.memberNum || memberNum) === 1]
+            );
+            memberNum++;
+          }
 
           // Update accountGroup for each member
           for (const { email } of groupData.members) {
@@ -541,9 +634,11 @@ app.post('/api/import-from-sheet', async (req, res) => {
               [groupName, email]
             );
           }
+
+          teamNumber++;
         }
 
-        // 4. Save to connected sheets
+        // 5. Save to connected sheets
         await client.query(
           `INSERT INTO ss_connected_sheets ("courseID", "sheetId", "sheetName", "groupCount")
            VALUES ($1, $2, $3, $4)
@@ -551,15 +646,12 @@ app.post('/api/import-from-sheet', async (req, res) => {
           [courseId, sheetId, sheetTitle, Object.keys(groups).length]
         );
 
-
         results.push({
           courseCode: parsed.courseCode,
           courseName: parsed.courseName,
           courseId,
           groupCount: Object.keys(groups).length,
           memberCount: Object.values(groups).reduce((s, g) => s + g.members.length, 0),
-          groups, // pass along for SkyFlow sync below
-          parsed,
         });
       }
 
@@ -569,50 +661,6 @@ app.post('/api/import-from-sheet', async (req, res) => {
       throw err;
     } finally {
       client.release();
-    }
-
-    // ── SkyFlow sync (outside transaction — non-fatal) ──
-    try {
-      const orgResult = await pool.query('SELECT id FROM organizations LIMIT 1');
-      const orgId = orgResult.rows[0]?.id;
-      if (orgId) {
-        for (const result of results) {
-          const { parsed, groups } = result as any;
-          let teamNumber = 1;
-          for (const [groupName, groupData] of Object.entries(groups as Record<string, { members: { email: string; fullName: string }[]; adviser: string; proposedProject: string }>)) {
-            const teamName = `${parsed.courseCode} - ${groupName}`;
-            const existing = await pool.query(
-              'SELECT id FROM team_groups WHERE organization_id = $1 AND name = $2',
-              [orgId, teamName]
-            );
-            let teamId;
-            if (existing.rows.length > 0) {
-              teamId = existing.rows[0].id;
-              await pool.query('UPDATE team_groups SET updated_at = NOW() WHERE id = $1', [teamId]);
-            } else {
-              const teamRes = await pool.query(
-                `INSERT INTO team_groups (organization_id, team_number, name, description, adviser_name, status)
-                 VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
-                [orgId, teamNumber, teamName, `${parsed.courseName} | ${parsed.courseTerm}`, user.email || null]
-              );
-              teamId = teamRes.rows[0].id;
-            }
-            await pool.query('DELETE FROM team_group_members WHERE team_group_id = $1', [teamId]);
-            let memberNum = 1;
-            for (const { email, fullName } of groupData.members) {
-              await pool.query(
-                `INSERT INTO team_group_members (team_group_id, member_number, name, email, is_leader)
-                 VALUES ($1, $2, $3, $4, $5)`,
-                [teamId, memberNum, fullName, email, memberNum === 1]
-              );
-              memberNum++;
-            }
-            teamNumber++;
-          }
-        }
-      }
-    } catch (syncErr: any) {
-      console.error('SkyFlow sync error (non-fatal):', syncErr.message);
     }
 
     const totalGroups = results.reduce((s, r) => s + r.groupCount, 0);
@@ -736,13 +784,22 @@ app.post('/api/courses/:id/import-groups', async (req, res) => {
         await client.query('UPDATE ss_account SET "accountGroup" = $1 WHERE "accountEmail" = $2', [groupName, email]);
       }
 
-      // 2. Replace old groupings for this course
-      await client.query('DELETE FROM ss_groupings WHERE "courseID" = $1', [courseId]);
+      // 2. Replace old team_groups for this course
+      const oldTeams2 = await client.query('SELECT id FROM team_groups WHERE course_id = $1', [courseId]);
+      for (const t of oldTeams2.rows) {
+        await client.query('DELETE FROM team_group_members WHERE team_group_id = $1', [t.id]);
+      }
+      await client.query('DELETE FROM team_groups WHERE course_id = $1', [courseId]);
+      const orgRes2 = await client.query('SELECT id FROM organizations LIMIT 1');
+      const orgId2 = orgRes2.rows[0]?.id;
+      let tn = 1;
       for (const groupName of Object.keys(groupCounts)) {
         await client.query(
-          'INSERT INTO ss_groupings ("groupName", "groupMembers", "courseID") VALUES ($1, $2, $3)',
-          [groupName, groupCounts[groupName], courseId]
+          `INSERT INTO team_groups (organization_id, team_number, name, course_id, status)
+           VALUES ($1, $2, $3, $4, 'active')`,
+          [orgId2, tn, groupName, courseId]
         );
+        tn++;
       }
 
       // 3. Auto-save sheet to connected_sheets so it appears in workspace-sync
@@ -845,7 +902,7 @@ app.get('/api/courses/:id/teams', async (req, res) => {
     if (!account) return res.status(404).json({ error: 'Account not found' });
 
     const role = account.accountRole;
-    const { rows: allGroups } = await pool.query('SELECT * FROM ss_groupings WHERE "courseID" = $1', [courseId]);
+    const { rows: allGroups } = await pool.query('SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project, consultation_dates, comments, grade, course_id as "courseID" FROM team_groups WHERE course_id = $1 ORDER BY team_number', [courseId]);
 
     if (role === 'Admin') {
       return res.json({ teams: allGroups, userRole: 'admin', viewType: 'all' });

@@ -20,6 +20,7 @@ import {
     X,
     Plus,
     Trash2,
+    Send,
 } from 'lucide-react';
 
 type Course = {
@@ -40,9 +41,10 @@ type GroupMember = {
 };
 
 type Group = {
-    groupID: number;
+    id: string;
     groupName: string;
     groupMembers: number;
+    team_number: number;
     courseID: number;
     members: GroupMember[];
     adviser: string;
@@ -50,6 +52,13 @@ type Group = {
     consultation_dates: string[];
     comments: string;
     grade: string;
+};
+
+type Comment = {
+    id: string;
+    user_name: string;
+    content: string;
+    created_at: string;
 };
 
 export default function CourseDetailsPage() {
@@ -69,9 +78,11 @@ export default function CourseDetailsPage() {
     const [modalGrade, setModalGrade] = useState('');
     const [modalDates, setModalDates] = useState<string[]>([]);
     const [modalNewDate, setModalNewDate] = useState('');
-    const [modalComments, setModalComments] = useState('');
+    const [comments, setComments] = useState<Comment[]>([]);
+    const [newComment, setNewComment] = useState('');
+    const [submittingComment, setSubmittingComment] = useState(false);
 
-    const skyflowUrl = 'http://localhost:3001';
+    const skyflowUrl = 'http://localhost:3000/team';
 
     useEffect(() => {
         const token = localStorage.getItem('auth_token');
@@ -108,12 +119,45 @@ export default function CourseDetailsPage() {
         setSelectedGroup(group);
         setModalGrade(group.grade || '');
         setModalDates(Array.isArray(group.consultation_dates) ? group.consultation_dates : []);
-        setModalComments(group.comments || '');
+        setNewComment('');
         setModalNewDate('');
+        fetchComments(group.id);
     };
 
     const closeModal = () => {
         setSelectedGroup(null);
+        setComments([]);
+    };
+
+    const fetchComments = async (groupId: string) => {
+        const token = localStorage.getItem('auth_token');
+        if (!token) return;
+        try {
+            const res = await fetch(`${API_URL}/api/team-groups/${groupId}/comments`, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+            if (res.ok) setComments(await res.json());
+        } catch { /* ignore */ }
+    };
+
+    const submitComment = async () => {
+        if (!newComment.trim() || !selectedGroup || submittingComment) return;
+        const token = localStorage.getItem('auth_token');
+        if (!token) return;
+        setSubmittingComment(true);
+        try {
+            const res = await fetch(`${API_URL}/api/team-groups/${selectedGroup.id}/comments`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${token}` },
+                body: JSON.stringify({ content: newComment.trim() })
+            });
+            if (res.ok) {
+                const saved = await res.json();
+                setComments(prev => [...prev, saved]);
+                setNewComment('');
+            }
+        } catch { /* ignore */ }
+        finally { setSubmittingComment(false); }
     };
 
     const addConsultDate = () => {
@@ -219,7 +263,7 @@ export default function CourseDetailsPage() {
                         <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 gap-3">
                             {groups.map((group) => (
                                 <button
-                                    key={group.groupID}
+                                    key={group.id}
                                     onClick={() => openGroup(group)}
                                     className="group bg-white hover:bg-gradient-to-br hover:from-blue-50 hover:to-cyan-50 border border-gray-200 hover:border-blue-300 rounded-2xl p-4 text-left transition-all duration-200 hover:shadow-md"
                                 >
@@ -371,11 +415,12 @@ export default function CourseDetailsPage() {
                                 </div>
                             </div>
 
-                            {/* ── Column 3: Comments ── */}
-                            <div className="col-span-4 p-5">
+                            {/* ── Column 3: Comments / Discussion ── */}
+                            <div className="col-span-4 p-5 flex flex-col">
                                 <div className="flex items-center gap-1.5 mb-4">
                                     <MessageSquare className="w-4 h-4 text-green-500" />
-                                    <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Comments</h3>
+                                    <h3 className="text-xs font-bold text-gray-500 uppercase tracking-wider">Discussion</h3>
+                                    <span className="text-xs text-gray-300 ml-auto">synced with SkyFlow</span>
                                 </div>
 
                                 {selectedGroup.proposed_project && (
@@ -385,13 +430,42 @@ export default function CourseDetailsPage() {
                                     </div>
                                 )}
 
-                                <textarea
-                                    value={modalComments}
-                                    onChange={e => setModalComments(e.target.value)}
-                                    placeholder="Add comments about this group..."
-                                    rows={8}
-                                    className="w-full px-3 py-2.5 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-green-300 bg-gray-50 resize-none placeholder-gray-300 leading-relaxed"
-                                />
+                                {/* Comment thread */}
+                                <div className="flex-1 overflow-y-auto mb-3 space-y-3 max-h-[280px] min-h-[120px]">
+                                    {comments.length === 0 && (
+                                        <p className="text-sm text-gray-300 italic text-center py-6">No comments yet. Start the discussion!</p>
+                                    )}
+                                    {comments.map(c => (
+                                        <div key={c.id} className="bg-gray-50 border border-gray-100 rounded-xl px-3 py-2">
+                                            <div className="flex items-center justify-between mb-1">
+                                                <span className="text-xs font-semibold text-blue-600">{c.user_name}</span>
+                                                <span className="text-[10px] text-gray-400">
+                                                    {new Date(c.created_at).toLocaleDateString('en-US', { month: 'short', day: 'numeric' })}{' '}
+                                                    {new Date(c.created_at).toLocaleTimeString('en-US', { hour: '2-digit', minute: '2-digit' })}
+                                                </span>
+                                            </div>
+                                            <p className="text-sm text-gray-700 leading-relaxed">{c.content}</p>
+                                        </div>
+                                    ))}
+                                </div>
+
+                                {/* Comment input */}
+                                <div className="flex gap-2">
+                                    <input
+                                        value={newComment}
+                                        onChange={e => setNewComment(e.target.value)}
+                                        onKeyDown={e => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); submitComment(); } }}
+                                        placeholder="Write a comment..."
+                                        className="flex-1 px-3 py-2 text-sm border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-green-300 bg-gray-50 placeholder-gray-300"
+                                    />
+                                    <button
+                                        onClick={submitComment}
+                                        disabled={!newComment.trim() || submittingComment}
+                                        className="px-3 py-2 bg-gradient-to-r from-green-500 to-emerald-500 text-white rounded-xl hover:from-green-600 hover:to-emerald-600 disabled:opacity-40 disabled:cursor-not-allowed transition"
+                                    >
+                                        <Send className="w-4 h-4" />
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
