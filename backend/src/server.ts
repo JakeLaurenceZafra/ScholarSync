@@ -2,21 +2,18 @@ import express from 'express';
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import jwt from 'jsonwebtoken';
+import { createClient } from '@supabase/supabase-js';
 import cors from 'cors';
 import 'dotenv/config';
-import pg from 'pg';
-import axios from 'axios';
-import { parse } from 'csv-parse/sync';
 
-const { Pool } = pg;
-
-// Use SkyFlow's PostgreSQL database as the primary DB now
-const pool = new Pool({ connectionString: process.env.SKYFLOW_DATABASE_URL });
+const supabaseUrl = process.env.SUPABASE_URL!;
+const supabaseKey = process.env.SUPABASE_ANON_KEY!;
+const supabase = createClient(supabaseUrl, supabaseKey);
 
 const app = express();
 
 app.use(cors({
-  origin: ['http://localhost:3000', 'http://localhost:3002'],
+  origin: 'http://localhost:3000',
   credentials: true
 }));
 app.use(express.json());
@@ -30,25 +27,32 @@ passport.use(new GoogleStrategy({
     try {
       const email = profile.emails?.[0]?.value;
       const name = profile.displayName;
+      const googleId = profile.id;
 
       if (!email) {
         return done(new Error("No email found from Google profile"));
       }
 
-      const { rows } = await pool.query('SELECT * FROM ss_account WHERE "accountEmail" = $1', [email]);
-      const user = rows[0];
+      const { data: user, error } = await supabase
+        .from('ss_account')
+        .select('*')
+        .eq('accountEmail', email)
+        .single();
 
-      if (!user) {
-        return done(null, { isNew: true, email: email, accessToken } as any);
+      if (error && error.code !== 'PGRST116') { // PGRST116 is 'No rows found'
+        throw new Error(error.message);
       }
 
-      // Store / update access token for Google Drive/Sheets access
-      await pool.query(
-        'UPDATE ss_account SET "googleAccessToken" = $1 WHERE "accountEmail" = $2',
-        [accessToken, email]
-      );
+      if (!user) {
+        // User does not exist, pass the email forward via a temporary object
+        return done(null, { isNew: true, email: email } as any);
+      }
 
-      return done(null, { ...user, id: user.account_id, email: user.accountEmail, accessToken } as any);
+      // Generate random account_id for legacy/JWT compatibility if not present (assuming UUID typically)
+      // We pass the existing user directly
+      return done(null, { ...user, id: user.account_id, email: user.accountEmail } as any);
+
+      return done(null, user);
     } catch (err) {
       return done(err as Error);
     }
@@ -56,18 +60,7 @@ passport.use(new GoogleStrategy({
 ));
 
 app.get('/auth/google',
-  passport.authenticate('google', {
-    scope: [
-      'profile',
-      'email',
-      'https://www.googleapis.com/auth/drive.readonly',
-      'https://www.googleapis.com/auth/drive.file',
-      'https://www.googleapis.com/auth/spreadsheets.readonly',
-      'https://www.googleapis.com/auth/spreadsheets'
-    ],
-    accessType: 'offline',
-    prompt: 'consent'
-  } as any)
+  passport.authenticate('google', { scope: ['profile', 'email'] })
 );
 
 app.get('/auth/google/callback',
@@ -76,21 +69,23 @@ app.get('/auth/google/callback',
     const user = req.user as any;
 
     if (user.isNew) {
+      // Temporary token just containing their email to prove they passed Google OAuth
       const tempToken = jwt.sign(
-        { email: user.email, accessToken: user.accessToken, isRegistrationToken: true },
+        { email: user.email, isRegistrationToken: true },
         process.env.JWT_SECRET || "test",
         { expiresIn: '15m' }
       );
       return res.redirect(`http://localhost:3000/complete-profile?token=${tempToken}`);
     }
 
+    // Existing user
     const token = jwt.sign(
       { id: user.id, email: user.email, role: user.accountRole },
       process.env.JWT_SECRET || "test",
       { expiresIn: '24h' }
     );
 
-    res.redirect(`http://localhost:3002/auth-success?token=${token}`);
+    res.redirect(`http://localhost:3000/auth-success?token=${token}`);
   }
 );
 
@@ -105,15 +100,22 @@ app.post('/api/complete-profile', async (req, res) => {
     }
 
     const email = decoded.email;
-    const accessToken = decoded.accessToken;
 
-    const insertRes = await pool.query(
-      `INSERT INTO ss_account ("accountName", "accountEmail", "accountRole", "googleAccessToken") 
-       VALUES ($1, $2, 'Student', $3) RETURNING *`,
-      [name, email, accessToken]
-    );
-    const newUser = insertRes.rows[0];
+    const { data: newUser, error } = await supabase
+      .from('ss_account')
+      .insert([{
+        accountName: name,
+        accountEmail: email,
+        accountRole: 'Student'
+      }])
+      .select()
+      .single();
 
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    // Create session token
     const sessionToken = jwt.sign(
       { id: newUser.account_id, email: newUser.accountEmail, role: newUser.accountRole },
       process.env.JWT_SECRET || "test",
@@ -121,11 +123,13 @@ app.post('/api/complete-profile', async (req, res) => {
     );
 
     res.json({ token: sessionToken, user: newUser });
-  } catch (error: any) {
+
+  } catch (error) {
     return res.status(401).json({ error: "Token expired or invalid" });
   }
 });
 
+// Middleware to verify Admin token
 const verifyAdmin = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
@@ -140,12 +144,13 @@ const verifyAdmin = (req: express.Request, res: express.Response, next: express.
 };
 
 app.get('/api/accounts', verifyAdmin, async (req, res) => {
-  try {
-    const { rows } = await pool.query('SELECT account_id, "accountName", "accountEmail", "accountRole" FROM ss_account ORDER BY "accountName"');
-    res.json(rows);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
+  const { data, error } = await supabase
+    .from('ss_account')
+    .select('account_id, accountName, accountEmail, accountRole')
+    .order('accountName');
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 app.put('/api/accounts/:id/role', verifyAdmin, async (req, res) => {
@@ -153,26 +158,30 @@ app.put('/api/accounts/:id/role', verifyAdmin, async (req, res) => {
   const { role } = req.body;
   if (!role) return res.status(400).json({ error: "Missing role" });
 
-  try {
-    const { rows } = await pool.query(
-      'UPDATE ss_account SET "accountRole" = $1 WHERE account_id = $2 RETURNING *',
-      [role, accountId]
-    );
-    res.json(rows[0]);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
+  const { data, error } = await supabase
+    .from('ss_account')
+    .update({ accountRole: role })
+    .eq('account_id', accountId)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 app.delete('/api/accounts/:id', verifyAdmin, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM ss_account WHERE account_id = $1', [req.params.id]);
-    res.json({ success: true });
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
-  }
+  const accountId = req.params.id;
+
+  const { error } = await supabase
+    .from('ss_account')
+    .delete()
+    .eq('account_id', accountId);
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json({ success: true });
 });
 
+// Middleware to verify Instructor (Admin or Adviser) token
 const verifyInstructor = (req: express.Request, res: express.Response, next: express.NextFunction) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
@@ -196,19 +205,64 @@ app.get('/api/courses', async (req, res) => {
   try {
     const user: any = jwt.verify(token, process.env.JWT_SECRET || "test");
 
-    const enrollRes = await pool.query('SELECT course_id FROM ss_enrollments WHERE account_id = $1', [user.id]);
-    const enrolledCourseIds = enrollRes.rows.map(e => e.course_id);
+    // Fetch enrolled courses first
+    let enrolledCourseIds: any[] = [];
+    const { data: enrollments, error: enrollError } = await supabase
+      .from('ss_enrollments')
+      .select('course_id')
+      .eq('account_id', user.id);
 
-    if (user.role === 'Admin' || user.role === 'Advisers') {
-      // Admin/Advisers see ALL courses
-      const { rows: allCourses } = await pool.query('SELECT * FROM ss_courses ORDER BY id DESC');
-      return res.json(allCourses);
+    if (!enrollError && enrollments) {
+      enrolledCourseIds = enrollments.map(e => e.course_id);
     }
 
+    if (user.role === 'Admin' || user.role === 'Advisers') {
+      // Fetch created courses
+      const { data: createdCourses, error: createdError } = await supabase
+        .from('ss_courses')
+        .select('*')
+        .eq('courseAdviser', user.email)
+        .order('id', { ascending: false });
+
+      if (createdError) return res.status(500).json({ error: createdError.message });
+
+      // Fetch enrolled courses details if any
+      let enrolledCourses: any[] = [];
+      if (enrolledCourseIds.length > 0) {
+        const { data, error } = await supabase
+          .from('ss_courses')
+          .select('*')
+          .in('id', enrolledCourseIds)
+          .order('id', { ascending: false });
+        if (data) enrolledCourses = data;
+      }
+
+      // Merge and deduplicate by id
+      const allCourses = [...(createdCourses || []), ...enrolledCourses];
+      const uniqueCoursesMap = new Map();
+      for (const c of allCourses) {
+        uniqueCoursesMap.set(c.id, c);
+      }
+      const uniqueCourses = Array.from(uniqueCoursesMap.values());
+      uniqueCourses.sort((a, b) => b.id - a.id); // Sort descending
+
+      return res.json(uniqueCourses);
+    }
+
+    // Student logic: Only fetch enrolled courses
     if (user.role === 'Student') {
-      if (enrolledCourseIds.length === 0) return res.json([]);
-      const { rows } = await pool.query('SELECT * FROM ss_courses WHERE id = ANY($1::int[]) ORDER BY id DESC', [enrolledCourseIds]);
-      return res.json(rows);
+      if (enrolledCourseIds.length === 0) {
+        return res.json([]);
+      }
+
+      const { data: enrolledCourses, error: coursesError } = await supabase
+        .from('ss_courses')
+        .select('*')
+        .in('id', enrolledCourseIds)
+        .order('id', { ascending: false });
+
+      if (coursesError) return res.status(500).json({ error: coursesError.message });
+      return res.json(enrolledCourses);
     }
 
     return res.json([]);
@@ -224,9 +278,16 @@ app.get('/api/courses/:id', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows } = await pool.query('SELECT * FROM ss_courses WHERE id = $1', [req.params.id]);
-    if (rows.length === 0) return res.status(404).json({ error: "Course not found" });
-    return res.json(rows[0]);
+    const courseId = req.params.id;
+
+    const { data, error } = await supabase
+      .from('ss_courses')
+      .select('*')
+      .eq('id', courseId)
+      .single();
+
+    if (error) return res.status(404).json({ error: "Course not found" });
+    return res.json(data);
   } catch (err) {
     return res.sendStatus(403);
   }
@@ -239,67 +300,34 @@ app.get('/api/courses/:id/members', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const enrollRes = await pool.query('SELECT account_id FROM ss_enrollments WHERE course_id = $1', [req.params.id]);
-    const accountIds = enrollRes.rows.map(e => e.account_id);
+    const courseId = req.params.id;
 
-    if (accountIds.length === 0) return res.json([]);
+    // STEP 1: Get all account_ids enrolled in this course
+    const { data: enrollments, error: enrollError } = await supabase
+      .from('ss_enrollments')
+      .select('account_id')
+      .eq('course_id', courseId);
 
-    const actRes = await pool.query(
-      'SELECT account_id as id, "accountName", "accountEmail", "accountRole" FROM ss_account WHERE account_id = ANY($1::int[])',
-      [accountIds]
-    );
+    if (enrollError) return res.status(500).json({ error: enrollError.message });
 
-    // Map account_id back to id for the frontend
-    const formatted = actRes.rows.map(r => ({ ...r, account_id: r.id }));
-    return res.json(formatted);
+    if (!enrollments || enrollments.length === 0) {
+      return res.json([]);
+    }
+
+    // Extract raw IDs
+    const accountIds = enrollments.map(e => e.account_id);
+
+    // STEP 2: Fetch the account records matching those IDs safely
+    const { data: accounts, error: accountError } = await supabase
+      .from('ss_account')
+      .select('account_id, accountName, accountEmail, accountRole')
+      .in('account_id', accountIds);
+
+    if (accountError) return res.status(500).json({ error: accountError.message });
+
+    return res.json(accounts);
   } catch (err) {
     return res.sendStatus(403);
-  }
-});
-// ── Team Group Comments (shared with SkyFlow's Discussion) ──
-app.get('/api/team-groups/:id/comments', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows } = await pool.query(
-      `SELECT id, user_name, content, created_at FROM team_comments
-       WHERE team_group_id = $1 ORDER BY created_at ASC`,
-      [req.params.id]
-    );
-    return res.json(rows);
-  } catch (err) {
-    return res.sendStatus(403);
-  }
-});
-
-app.post('/api/team-groups/:id/comments', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  try {
-    const decoded = jwt.verify(token, process.env.JWT_SECRET || "test") as any;
-    const { content } = req.body;
-    if (!content || !content.trim()) return res.status(400).json({ error: 'Comment cannot be empty' });
-
-    // Get user name from ss_account
-    const userResult = await pool.query(
-      'SELECT "accountName", "accountEmail" FROM ss_account WHERE account_id = $1',
-      [decoded.id]
-    );
-    const userName = userResult.rows[0]?.accountName || decoded.email || 'Unknown';
-
-    const { rows } = await pool.query(
-      `INSERT INTO team_comments (team_group_id, user_id, user_name, content)
-       VALUES ($1, $2, $3, $4) RETURNING id, user_name, content, created_at`,
-      [req.params.id, null, userName, content.trim()]
-    );
-    return res.json(rows[0]);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
   }
 });
 
@@ -310,585 +338,21 @@ app.get('/api/courses/:id/groupings', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows } = await pool.query(
-      `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project, 
-              consultation_dates, comments, grade, course_id as "courseID"
-       FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
-      [req.params.id]
-    );
-    return res.json(rows);
+    const courseId = req.params.id;
+
+    const { data, error } = await supabase
+      .from('ss_groupings')
+      .select('*')
+      .eq('courseID', courseId);
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
   } catch (err) {
     return res.sendStatus(403);
   }
 });
 
-// Returns groupings WITH embedded members for a course
-app.get('/api/courses/:id/group-members', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows: groups } = await pool.query(
-      `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project,
-              consultation_dates, comments, grade, course_id as "courseID"
-       FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
-      [req.params.id]
-    );
-
-    // Fetch members for each group
-    const enriched = await Promise.all(groups.map(async (g: any) => {
-      const { rows: members } = await pool.query(
-        `SELECT member_number, name, email, is_leader FROM team_group_members
-         WHERE team_group_id = $1 ORDER BY member_number`,
-        [g.id]
-      );
-      return {
-        ...g,
-        groupMembers: members.length,
-        members,
-      };
-    }));
-
-    return res.json(enriched);
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message });
-  }
-});
-
-// ================================================================
-// SMART IMPORT: Auto-detect course from TEAM CODE column
-// Format: 2526-sem1-it332-01
-//   2526  = academic year (2025-2026)
-//   sem1  = semester
-//   it332 = course code
-//   01    = group number
-// ================================================================
-
-function parseTeamCode(teamCode: string) {
-  const clean = teamCode.trim().toLowerCase();
-  const parts = clean.split('-');
-  if (parts.length < 4) return null;
-
-  const yearPart = parts[0] ?? '';
-  const semPart = parts[1] ?? '';
-  const codePart = parts[2] ?? '';
-  const groupPart = parts.slice(3).join('-');
-
-  if (!yearPart.match(/^\d{4}$/) || !semPart.startsWith('sem') || !codePart) return null;
-
-  const y1 = `20${yearPart.slice(0, 2)}`;
-  const y2 = `20${yearPart.slice(2, 4)}`;
-  const academicYear = `${y1}-${y2}`;
-  const semNum = semPart.replace('sem', '');
-  const semester = semNum === '1' ? '1st Semester' : semNum === '2' ? '2nd Semester' : `Semester ${semNum}`;
-  const courseCode = codePart.toUpperCase();
-  const groupNum = parseInt(groupPart, 10) || groupPart;
-  const groupName = `Group ${groupNum}`;
-  const courseKeyBase = `${yearPart}${semPart}${codePart}`;
-
-  return {
-    courseCode,
-    courseName: `${courseCode} — ${semester} ${academicYear}`,
-    courseTerm: `${semester} ${academicYear}`,
-    courseKey: courseKeyBase.substring(0, 20),
-    groupName,
-    groupPart,
-  };
-}
-
-app.post('/api/import-from-sheet', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  let user: any;
-  try {
-    user = (jwt.verify(token, process.env.JWT_SECRET || 'test') as any);
-  } catch {
-    return res.sendStatus(403);
-  }
-
-  const { sheetId } = req.body;
-  if (!sheetId) return res.status(400).json({ error: 'Missing sheetId' });
-
-  try {
-    const accessToken = await getAccessToken(token);
-    let records: any[] = [];
-    let sheetTitle = 'Imported Sheet';
-
-    // Helper: find the actual header row (scans until it finds a row with a cell === 'TEAM CODE')
-    const findHeaderRow = (rows: string[][]): { headers: string[]; dataRows: string[][] } | null => {
-      for (let i = 0; i < rows.length; i++) {
-        const row = rows[i] ?? [];
-        const hasTeamCode = row.some(cell => cell.toString().trim().toUpperCase() === 'TEAM CODE');
-        if (hasTeamCode) {
-          return {
-            headers: row.map(h => h.toString().trim()),
-            dataRows: rows.slice(i + 1)
-          };
-        }
-      }
-      return null;
-    };
-
-    // Try Google Sheets API first (private sheets)
-    if (accessToken) {
-      try {
-        const metaRes = await axios.get(
-          `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=properties.title`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        sheetTitle = metaRes.data?.properties?.title || sheetTitle;
-
-        const dataRes = await axios.get(
-          `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A1:Z1000`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        const values: string[][] = dataRes.data.values || [];
-        const found = findHeaderRow(values);
-        if (found && found.dataRows.length > 0) {
-          records = found.dataRows
-            .filter(row => row.some(cell => cell.toString().trim() !== '')) // skip blank rows
-            .map(row => {
-              const obj: any = {};
-              found.headers.forEach((h, i) => { obj[h] = (row[i] ?? '').toString().trim(); });
-              return obj;
-            });
-        }
-      } catch (e: any) {
-        console.log('Sheets API failed, falling back to CSV:', e.message);
-      }
-    }
-
-    // Fallback: public CSV — parse raw lines to find TEAM CODE header row
-    if (records.length === 0) {
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
-      const response = await axios.get(csvUrl);
-      // Parse without column headers to get raw rows
-      const rawRows: string[][] = parse(response.data, { columns: false, skip_empty_lines: false, relax_column_count: true });
-      const found = findHeaderRow(rawRows);
-      if (found && found.dataRows.length > 0) {
-        records = found.dataRows
-          .filter(row => row.some(cell => cell.toString().trim() !== ''))
-          .map(row => {
-            const obj: any = {};
-            found.headers.forEach((h, i) => { obj[h] = (row[i] ?? '').toString().trim(); });
-            return obj;
-          });
-      } else {
-        // Fallback: original behaviour (treat first row as headers)
-        records = parse(response.data, { columns: true, skip_empty_lines: true });
-      }
-    }
-
-    if (records.length === 0) {
-      return res.status(400).json({ error: 'Sheet is empty or inaccessible.' });
-    }
-
-    // Case-insensitive column finder with partial matching
-    // e.g. 'email' matches column 'EMAIL @cit.edu'
-    const findCol = (row: any, ...names: string[]) => {
-      for (const name of names) {
-        const nameLow = name.toLowerCase();
-        // Exact match
-        let key = Object.keys(row).find(k => k.trim().toLowerCase() === nameLow);
-        if (!key) {
-          // Partial match — the column header contains the search name
-          key = Object.keys(row).find(k => k.trim().toLowerCase().includes(nameLow));
-        }
-        if (key !== undefined && row[key]) return row[key].toString().trim();
-      }
-      return '';
-    };
-
-    // Group rows by team code
-    // Structure: { courseKeyBase: { parsed, groups map with members + metadata } }
-    const courseMap: Record<string, {
-      parsed: ReturnType<typeof parseTeamCode>;
-      groups: Record<string, { members: { email: string; fullName: string; memberNum: number }[]; adviser: string; proposedProject: string }>;
-    }> = {};
-
-    for (const row of records) {
-      const teamCode = findCol(row, 'TEAM CODE', 'Team Code', 'teamcode', 'group', 'Group', 'GROUP');
-      const email = findCol(row, 'EMAIL', 'Email', 'email');
-      const fullName = findCol(row, 'FIRSTNAME', 'First Name', 'Full name', 'Full Name', 'Name', 'LASTNAME', 'Lastname');
-      const lastName = findCol(row, 'LASTNAME', 'Lastname', 'Last Name');
-      const firstName = findCol(row, 'FIRSTNAME', 'Firstname', 'First Name');
-      const memberNum = parseInt(findCol(row, 'MEMBER #', 'Member #', 'member', 'Member') || '0', 10);
-      const adviser = findCol(row, 'ADVISER', 'Adviser', 'advisor', 'Advisor');
-      const proposedProject = findCol(row, 'PROPOSED PROJECT', 'Proposed Project', 'Project', 'project');
-
-      if (!teamCode || !email) continue;
-
-      const parsed = parseTeamCode(teamCode);
-      if (!parsed) continue;
-
-      const key = parsed.courseKey;
-      if (!courseMap[key]) {
-        courseMap[key] = { parsed, groups: {} };
-      }
-
-      const displayName = fullName || (firstName && lastName ? `${firstName} ${lastName}` : email.split('@')[0]);
-
-      if (!courseMap[key].groups[parsed.groupName]) {
-        courseMap[key].groups[parsed.groupName] = { members: [], adviser: '', proposedProject: '' };
-      }
-      courseMap[key].groups[parsed.groupName].members.push({ email, fullName: displayName, memberNum: memberNum || (courseMap[key].groups[parsed.groupName].members.length + 1) });
-      // Keep adviser/project from any non-empty row
-      if (adviser) courseMap[key].groups[parsed.groupName].adviser = adviser;
-      if (proposedProject) courseMap[key].groups[parsed.groupName].proposedProject = proposedProject;
-    }
-
-    if (Object.keys(courseMap).length === 0) {
-      return res.status(400).json({
-        error: 'No valid TEAM CODE rows found. Expected format: 2526-sem1-it332-01'
-      });
-    }
-
-    const client = await pool.connect();
-    const results: any[] = [];
-
-    try {
-      await client.query('BEGIN');
-
-      for (const [courseKey, { parsed, groups }] of Object.entries(courseMap)) {
-        if (!parsed) continue;
-
-        // 1. Find or create the course
-        const existingCourse = await client.query(
-          'SELECT id FROM ss_courses WHERE "courseKey" = $1',
-          [parsed.courseKey]
-        );
-
-        let courseId: number;
-        if (existingCourse.rows.length > 0) {
-          courseId = existingCourse.rows[0].id;
-        } else {
-          // Generate a unique key to avoid collisions
-          const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-          const suffix = Array.from({ length: 4 }, () => chars.charAt(Math.floor(Math.random() * chars.length))).join('');
-          const uniqueKey = `${parsed.courseKey.substring(0, 16)}-${suffix}`;
-
-          const newCourse = await client.query(
-            `INSERT INTO ss_courses ("courseName", "courseCode", "courseSection", "courseTerm", "courseKey", "courseAmount", "courseAdviser")
-             VALUES ($1, $2, '', $3, $4, 0, $5) RETURNING id`,
-            [parsed.courseName, parsed.courseCode, parsed.courseTerm, uniqueKey, user.email || null]
-          );
-          courseId = newCourse.rows[0].id;
-        }
-
-        // 2. Get the ScholarSync organization for team_groups
-        let orgResult = await client.query("SELECT id FROM organizations WHERE name = 'ScholarSync' LIMIT 1");
-        if (orgResult.rows.length === 0) {
-          orgResult = await client.query(
-            `INSERT INTO organizations (name, description, domain)
-             VALUES ('ScholarSync', 'Academic collaboration workspace synced from ScholarSync', 'scholarsync.local')
-             RETURNING id`
-          );
-        }
-        const orgId = orgResult.rows[0]?.id;
-
-        // 3. Clear old team_groups for this course
-        const oldTeams = await client.query('SELECT id FROM team_groups WHERE course_id = $1', [courseId]);
-        for (const t of oldTeams.rows) {
-          await client.query('DELETE FROM team_group_members WHERE team_group_id = $1', [t.id]);
-        }
-        await client.query('DELETE FROM team_groups WHERE course_id = $1', [courseId]);
-
-        // 4. Insert new groups into team_groups + team_group_members
-        let teamNumber = 1;
-        for (const [groupName, groupData] of Object.entries(groups)) {
-          const teamRes = await client.query(
-            `INSERT INTO team_groups (organization_id, team_code, team_number, name, description, adviser_name, course_id, proposed_project, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'active') RETURNING id`,
-            [
-              orgId,
-              parsed.courseKey,
-              teamNumber,
-              groupName,
-              `${parsed.courseName} | ${parsed.courseTerm}`,
-              groupData.adviser || null,
-              courseId,
-              groupData.proposedProject || null,
-            ]
-          );
-          const teamId = teamRes.rows[0].id;
-
-          // Insert members into team_group_members
-          let memberNum = 1;
-          for (const member of groupData.members) {
-            await client.query(
-              `INSERT INTO team_group_members (team_group_id, member_number, name, email, is_leader)
-               VALUES ($1, $2, $3, $4, $5)`,
-              [teamId, member.memberNum || memberNum, member.fullName, member.email, (member.memberNum || memberNum) === 1]
-            );
-            memberNum++;
-          }
-
-          // Update accountGroup for each member
-          for (const { email } of groupData.members) {
-            await client.query(
-              'UPDATE ss_account SET "accountGroup" = $1 WHERE "accountEmail" = $2',
-              [groupName, email]
-            );
-          }
-
-          teamNumber++;
-        }
-
-        // 5. Save to connected sheets
-        await client.query(
-          `INSERT INTO ss_connected_sheets ("courseID", "sheetId", "sheetName", "groupCount")
-           VALUES ($1, $2, $3, $4)
-           ON CONFLICT ("courseID", "sheetId") DO UPDATE SET "sheetName" = $3, "groupCount" = $4`,
-          [courseId, sheetId, sheetTitle, Object.keys(groups).length]
-        );
-
-        results.push({
-          courseCode: parsed.courseCode,
-          courseName: parsed.courseName,
-          courseId,
-          groupCount: Object.keys(groups).length,
-          memberCount: Object.values(groups).reduce((s, g) => s + g.members.length, 0),
-        });
-      }
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    const totalGroups = results.reduce((s, r) => s + r.groupCount, 0);
-    const totalMembers = results.reduce((s, r) => s + r.memberCount, 0);
-
-    return res.json({
-      success: true,
-      message: `Imported ${totalGroups} groups across ${results.length} course(s) from "${sheetTitle}" — ${totalMembers} members synced!`,
-      courses: results,
-      sheetTitle,
-    });
-
-  } catch (error: any) {
-    if (error?.response?.status === 403 || error?.response?.status === 404) {
-      return res.status(400).json({ error: "Cannot access sheet. Make sure it's shared with 'Anyone with the link'." });
-    }
-    return res.status(500).json({ error: error?.message || 'Import failed.' });
-  }
-});
-
-app.post('/api/courses/:id/import-groups', async (req, res) => {
-  const { sheetUrl, sheetId: directSheetId } = req.body;
-  const courseId = req.params.id;
-
-  if (!sheetUrl && !directSheetId) return res.status(400).json({ error: "Missing Google Sheets URL or ID" });
-
-  try {
-    // Extract sheet ID from URL or use direct ID
-    let sheetId: string;
-    if (directSheetId) {
-      sheetId = directSheetId;
-    } else {
-      const match = sheetUrl.match(/\/d\/([a-zA-Z0-9-_]+)/);
-      if (!match?.[1]) return res.status(400).json({ error: "Invalid Google Sheets link." });
-      sheetId = match[1];
-    }
-
-    // Get user's Google access token to read private sheets
-    const authHeader = req.headers.authorization;
-    const jwtToken = authHeader && authHeader.split(' ')[1];
-    const accessToken = jwtToken ? await getAccessToken(jwtToken) : null;
-
-    let records: any[] = [];
-    let sheetTitle = 'Imported Sheet';
-
-    // Try Sheets API first (works for private sheets the user owns)
-    if (accessToken) {
-      try {
-        const metaRes = await axios.get(
-          `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=properties.title`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        sheetTitle = metaRes.data?.properties?.title || sheetTitle;
-
-        const dataRes = await axios.get(
-          `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}/values/A1:Z1000`,
-          { headers: { Authorization: `Bearer ${accessToken}` } }
-        );
-        const values: string[][] = dataRes.data.values || [];
-        if (values.length > 1) {
-          const headers = values[0].map((h: string) => h.trim());
-          records = values.slice(1).map((row: string[]) => {
-            const obj: any = {};
-            headers.forEach((h, i) => { obj[h] = (row[i] || '').trim(); });
-            return obj;
-          });
-        }
-      } catch (sheetsErr: any) {
-        console.log('Sheets API failed, trying public CSV:', sheetsErr.message);
-      }
-    }
-
-    // Fallback to public CSV export
-    if (records.length === 0) {
-      const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
-      const response = await axios.get(csvUrl);
-      records = parse(response.data, { columns: true, skip_empty_lines: true });
-    }
-
-    if (records.length === 0) {
-      return res.status(400).json({ error: "Sheet appears to be empty or inaccessible." });
-    }
-
-    // Normalise column names (case-insensitive lookup)
-    const findCol = (row: any, ...names: string[]) => {
-      for (const name of names) {
-        const key = Object.keys(row).find(k => k.trim().toLowerCase() === name.toLowerCase());
-        if (key && row[key]) return row[key].trim();
-      }
-      return '';
-    };
-
-    const groupCounts: { [key: string]: number } = {};
-    const emailsToUpdate: { email: string; groupName: string; fullName: string }[] = [];
-
-    for (const row of records) {
-      const email = findCol(row, 'Email', 'EMAIL', 'email');
-      const groupName = findCol(row, 'group', 'Group', 'GROUP', 'TEAM CODE', 'Team Code', 'teamcode');
-      const fullName = findCol(row, 'Full name', 'Full Name', 'FULLNAME', 'Name', 'name', 'LASTNAME');
-
-      if (email && groupName) {
-        groupCounts[groupName] = (groupCounts[groupName] || 0) + 1;
-        emailsToUpdate.push({ email, groupName, fullName: fullName || email.split('@')[0] });
-      }
-    }
-
-    if (Object.keys(groupCounts).length === 0) {
-      return res.status(400).json({
-        error: "No valid groups found. Sheet must have columns: Email (or email), group (or Group/TEAM CODE)"
-      });
-    }
-
-    const client = await pool.connect();
-    let skyflowSyncMsg = '';
-
-    try {
-      await client.query('BEGIN');
-
-      // 1. Update account groups
-      for (const { email, groupName } of emailsToUpdate) {
-        await client.query('UPDATE ss_account SET "accountGroup" = $1 WHERE "accountEmail" = $2', [groupName, email]);
-      }
-
-      // 2. Replace old team_groups for this course
-      const oldTeams2 = await client.query('SELECT id FROM team_groups WHERE course_id = $1', [courseId]);
-      for (const t of oldTeams2.rows) {
-        await client.query('DELETE FROM team_group_members WHERE team_group_id = $1', [t.id]);
-      }
-      await client.query('DELETE FROM team_groups WHERE course_id = $1', [courseId]);
-      const orgRes2 = await client.query('SELECT id FROM organizations LIMIT 1');
-      const orgId2 = orgRes2.rows[0]?.id;
-      let tn = 1;
-      for (const groupName of Object.keys(groupCounts)) {
-        await client.query(
-          `INSERT INTO team_groups (organization_id, team_number, name, course_id, status)
-           VALUES ($1, $2, $3, $4, 'active')`,
-          [orgId2, tn, groupName, courseId]
-        );
-        tn++;
-      }
-
-      // 3. Auto-save sheet to connected_sheets so it appears in workspace-sync
-      await client.query(
-        `INSERT INTO ss_connected_sheets ("courseID", "sheetId", "sheetName", "groupCount")
-         VALUES ($1, $2, $3, $4)
-         ON CONFLICT ("courseID", "sheetId") DO UPDATE SET "sheetName" = $3, "groupCount" = $4`,
-        [courseId, sheetId, sheetTitle, Object.keys(groupCounts).length]
-      );
-
-      // 4. SkyFlow cross-sync
-      try {
-        const courseRes = await client.query(
-          'SELECT "courseName", "courseCode", "courseSection", "courseAdviser" FROM ss_courses WHERE id = $1',
-          [courseId]
-        );
-        const courseData = courseRes.rows[0];
-        const orgResult = await client.query('SELECT id FROM organizations LIMIT 1');
-        const orgId = orgResult.rows[0]?.id;
-
-        if (orgId) {
-          let teamNumber = 1;
-          for (const groupName of Object.keys(groupCounts)) {
-            const teamName = `${courseData?.courseCode || ''} - ${groupName}`;
-            const existing = await client.query(
-              'SELECT id FROM team_groups WHERE organization_id = $1 AND name = $2',
-              [orgId, teamName]
-            );
-
-            let teamId;
-            if (existing.rows.length > 0) {
-              teamId = existing.rows[0].id;
-              await client.query('UPDATE team_groups SET updated_at = NOW() WHERE id = $1', [teamId]);
-            } else {
-              const teamResult = await client.query(
-                `INSERT INTO team_groups (organization_id, team_number, name, description, adviser_name, status)
-                 VALUES ($1, $2, $3, $4, $5, 'active') RETURNING id`,
-                [orgId, teamNumber, teamName,
-                  `${courseData?.courseName} | ${courseData?.courseSection}`,
-                  courseData?.courseAdviser]
-              );
-              teamId = teamResult.rows[0].id;
-            }
-
-            await client.query('DELETE FROM team_group_members WHERE team_group_id = $1', [teamId]);
-            let memberNum = 1;
-            for (const entry of emailsToUpdate) {
-              if (entry.groupName === groupName) {
-                await client.query(
-                  `INSERT INTO team_group_members (team_group_id, member_number, name, email, is_leader)
-                   VALUES ($1, $2, $3, $4, $5)`,
-                  [teamId, memberNum, entry.fullName, entry.email, memberNum === 1]
-                );
-                memberNum++;
-              }
-            }
-            teamNumber++;
-          }
-          skyflowSyncMsg = ' Synced to SkyFlow Team Board!';
-        }
-      } catch (syncErr: any) {
-        console.error('SkyFlow sync error:', syncErr.message);
-        skyflowSyncMsg = ' (SkyFlow sync skipped)';
-      }
-
-      await client.query('COMMIT');
-    } catch (err) {
-      await client.query('ROLLBACK');
-      throw err;
-    } finally {
-      client.release();
-    }
-
-    return res.json({
-      success: true,
-      message: `Imported ${Object.keys(groupCounts).length} groups (${emailsToUpdate.length} members) from "${sheetTitle}"!${skyflowSyncMsg}`,
-      groupCount: Object.keys(groupCounts).length,
-      memberCount: emailsToUpdate.length
-    });
-
-  } catch (error: any) {
-    if (error?.response?.status === 404 || error?.response?.status === 403) {
-      return res.status(400).json({ error: "Cannot access this Sheet. Make sure it's shared with 'Anyone with the link'." });
-    }
-    return res.status(500).json({ error: error?.message || "Failed to parse spreadsheet." });
-  }
-});
-
-app.get('/api/courses/:id/teams', async (req, res) => {
+app.get('/api/courses/:id/consultations', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.sendStatus(401);
@@ -897,31 +361,613 @@ app.get('/api/courses/:id/teams', async (req, res) => {
     const user: any = jwt.verify(token, process.env.JWT_SECRET || "test");
     const courseId = req.params.id;
 
-    const accRes = await pool.query('SELECT "accountRole", "accountEmail", "accountGroup", "accountName" FROM ss_account WHERE account_id = $1', [user.id]);
-    const account = accRes.rows[0];
-    if (!account) return res.status(404).json({ error: 'Account not found' });
+    let query = supabase
+      .from('ss_consultation')
+      .select('*')
+      .eq('courseID', courseId);
 
-    const role = account.accountRole;
-    const { rows: allGroups } = await pool.query('SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project, consultation_dates, comments, grade, course_id as "courseID" FROM team_groups WHERE course_id = $1 ORDER BY team_number', [courseId]);
-
-    if (role === 'Admin') {
-      return res.json({ teams: allGroups, userRole: 'admin', viewType: 'all' });
-    } else if (role === 'Advisers') {
-      const crsRes = await pool.query('SELECT "courseAdviser" FROM ss_courses WHERE id = $1', [courseId]);
-      if (crsRes.rows[0]?.courseAdviser === account.accountEmail) {
-        return res.json({ teams: allGroups, userRole: 'adviser', viewType: 'advised' });
-      }
-      return res.json({ teams: [], userRole: 'adviser', viewType: 'none' });
-    } else {
-      const studentGroup = account.accountGroup;
-      if (studentGroup) {
-        const myTeam = allGroups.filter((g: any) => g.groupName === studentGroup);
-        return res.json({ teams: myTeam, userRole: 'student', viewType: 'own' });
-      }
-      return res.json({ teams: [], userRole: 'student', viewType: 'none' });
+    // If user is a student, only show published consultations
+    if (user.role === 'Student') {
+      query = query.eq('isDraft', false);
     }
+
+    const { data, error } = await query;
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
   } catch (err) {
-    return res.status(403).json({ error: 'Invalid token' });
+    return res.sendStatus(403);
+  }
+});
+
+app.post('/api/courses/:id/consultations', verifyInstructor, async (req, res) => {
+  const courseId = req.params.id;
+  const { conDate, conType, conMil, conSum, isDraft, conStat, groupName } = req.body;
+
+  if (!conDate || !conType || !conMil || !conStat || !groupName) {
+    return res.status(400).json({ error: "Missing required consultation details" });
+  }
+
+  let attendeesStr = '';
+  let actionsStr = '';
+
+  if (groupName) {
+    // Find all users assigned to this group
+    const { data: students } = await supabase
+      .from('ss_account')
+      .select('accountName')
+      .eq('accountGroup', groupName);
+
+    if (students && students.length > 0) {
+      attendeesStr = students.map(s => s.accountName).join(', ');
+    }
+
+    // Fetch tasks for the group to auto-populate conAction
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', groupName).single();
+    if (group) {
+        const { data: tasks } = await supabase.from('ss_grouptasks').select('taskTitle').eq('groupID', group.smallgroupID);
+        if (tasks && tasks.length > 0) {
+            actionsStr = tasks.map(t => `- ${t.taskTitle}`).join('\n');
+        }
+    }
+  }
+
+  const { data, error } = await supabase
+    .from('ss_consultation')
+    .insert([{
+      courseID: courseId,
+      groupName,
+      conDate,
+      conType,
+      conMil,
+      conSum: conSum || '',
+      conAction: actionsStr,
+      conAtt: attendeesStr,
+      isDraft: isDraft || false,
+      conStat
+    }])
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.put('/api/consultations/:id', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName } = req.body;
+
+  const { data, error } = await supabase
+    .from('ss_consultation')
+    .update({
+      conDate,
+      conType,
+      conMil,
+      conSum,
+      conAction,
+      isDraft,
+      conStat,
+      groupName
+    })
+    .eq('conID', conID)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// GET existing attendance record
+app.get('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+
+  try {
+    const { data: record, error } = await supabase
+      .from('ss_attendance')
+      .select('*')
+      .eq('conID', conID)
+      .single();
+
+    if (error || !record) return res.json(null);
+
+    // Collect IDs
+    const idList = [
+      record.oneID, record.twoID, record.threeID, record.fourID, record.fiveID
+    ].filter(Boolean);
+
+    if (idList.length === 0) return res.json({});
+
+    // Fetch matching accounts to translate ID -> Name
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountName')
+      .in('account_id', idList);
+
+    const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+
+    const attendanceMap: Record<string, string> = {};
+    const extract = (idVal: number | null, statusVal: string | null) => {
+      if (idVal && accountMap.has(idVal)) {
+        attendanceMap[accountMap.get(idVal)!] = statusVal || 'Present';
+      }
+    };
+
+    extract(record.oneID, record.mem1);
+    extract(record.twoID, record.mem2);
+    extract(record.threeID, record.mem3);
+    extract(record.fourID, record.mem4);
+    extract(record.fiveID, record.mem5);
+
+    res.json(attendanceMap);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPSERT attendance record
+app.put('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { groupName, attendance } = req.body; // attendance is Record<string, 'Present' | 'Absent'>
+
+  if (!groupName || !attendance) return res.status(400).json({ error: "Missing required properties." });
+
+  try {
+    // 1. Get Group Structure
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('member1, member2, member3, member4, member5')
+      .eq('groupName', groupName)
+      .single();
+
+    if (!group) return res.status(404).json({ error: "Linked group not found" });
+
+    // 2. Map Emails to Account IDs via ss_account
+    const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountEmail, accountName')
+      .in('accountEmail', emailList);
+
+    const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
+
+    // Helper to get ID and Status
+    const getDetails = (email: string | null) => {
+      if (!email || !accountByEmail.has(email)) return { id: null, status: null };
+      const acct = accountByEmail.get(email)!;
+      return { id: acct.account_id, status: attendance[acct.accountName] || 'Present' };
+    };
+
+    const m1 = getDetails(group.member1);
+    const m2 = getDetails(group.member2);
+    const m3 = getDetails(group.member3);
+    const m4 = getDetails(group.member4);
+    const m5 = getDetails(group.member5);
+
+    const upsertPayload = {
+      conID,
+      oneID: m1.id, mem1: m1.status,
+      twoID: m2.id, mem2: m2.status,
+      threeID: m3.id, mem3: m3.status,
+      fourID: m4.id, mem4: m4.status,
+      fiveID: m5.id, mem5: m5.status
+    };
+
+    // Use conID as conflict resolution key if supported, otherwise update or insert
+    const { data: existing } = await supabase.from('ss_attendance').select('attID').eq('conID', conID).single();
+
+    if (existing) {
+      await supabase.from('ss_attendance').update(upsertPayload).eq('conID', conID);
+    } else {
+      await supabase.from('ss_attendance').insert([upsertPayload]);
+    }
+
+    res.json({ message: "Attendance saved successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET existing participation record
+app.get('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+
+  try {
+    const { data: record, error } = await supabase
+      .from('ss_participation')
+      .select('*')
+      .eq('conID', conID)
+      .single();
+
+    if (error || !record) return res.json(null);
+
+    // Collect IDs
+    const idList = [
+      record.mem1, record.mem2, record.mem3, record.mem4, record.mem5
+    ].filter(Boolean);
+
+    if (idList.length === 0) return res.json({});
+
+    // Fetch matching accounts to translate ID -> Name
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountName')
+      .in('account_id', idList);
+
+    const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+
+    const participationMap: Record<string, string> = {};
+    const extract = (idVal: number | null, ratingVal: string | null) => {
+      if (idVal && accountMap.has(idVal)) {
+        participationMap[accountMap.get(idVal)!] = ratingVal || 'Moderate';
+      }
+    };
+
+    extract(record.mem1, record.part1);
+    extract(record.mem2, record.part2);
+    extract(record.mem3, record.part3);
+    extract(record.mem4, record.part4);
+    extract(record.mem5, record.part5);
+
+    res.json(participationMap);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPSERT participation record
+app.put('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { groupName, participation } = req.body; // participation is Record<string, 'High' | 'Moderate' | 'Low'>
+
+  if (!groupName || !participation) return res.status(400).json({ error: "Missing required properties." });
+
+  try {
+    // 1. Get Group Structure
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('member1, member2, member3, member4, member5')
+      .eq('groupName', groupName)
+      .single();
+
+    if (!group) return res.status(404).json({ error: "Linked group not found" });
+
+    // 2. Map Emails to Account IDs via ss_account
+    const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountEmail, accountName')
+      .in('accountEmail', emailList);
+
+    const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
+
+    // Helper to get ID and Rating
+    const getDetails = (email: string | null) => {
+      if (!email || !accountByEmail.has(email)) return { id: null, rating: null };
+      const acct = accountByEmail.get(email)!;
+      return { id: acct.account_id, rating: participation[acct.accountName] || 'Moderate' };
+    };
+
+    const m1 = getDetails(group.member1);
+    const m2 = getDetails(group.member2);
+    const m3 = getDetails(group.member3);
+    const m4 = getDetails(group.member4);
+    const m5 = getDetails(group.member5);
+
+    const upsertPayload = {
+      conID,
+      mem1: m1.id, part1: m1.rating,
+      mem2: m2.id, part2: m2.rating,
+      mem3: m3.id, part3: m3.rating,
+      mem4: m4.id, part4: m4.rating,
+      mem5: m5.id, part5: m5.rating
+    };
+
+    const { data: existing } = await supabase.from('ss_participation').select('partID').eq('conID', conID).single();
+
+    if (existing) {
+      await supabase.from('ss_participation').update(upsertPayload).eq('conID', conID);
+    } else {
+      await supabase.from('ss_participation').insert([upsertPayload]);
+    }
+
+    res.json({ message: "Participation saved successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+import axios from 'axios';
+import { parse } from 'csv-parse/sync';
+
+app.post('/api/courses/:id/import-groups', verifyInstructor, async (req, res) => {
+  const { sheetUrl } = req.body;
+  const courseId = req.params.id;
+
+  if (!sheetUrl) return res.status(400).json({ error: "Missing Google Sheets URL" });
+
+  try {
+    const match = sheetUrl.match(/\/d\/(.*?)\//);
+    if (!match || !match[1]) {
+      return res.status(400).json({ error: "Invalid Google Sheets link. Please ensure it is the full URL." });
+    }
+    const sheetId = match[1];
+
+    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+    const response = await axios.get(csvUrl);
+    const csvData = response.data;
+
+    const records = parse(csvData, {
+      columns: true,
+      skip_empty_lines: true,
+    });
+
+    const groupsMap: { [key: string]: string[] } = {};
+    const updates = [];
+
+    for (const row of records as any[]) {
+      const email = row['Email']?.trim();
+      const groupName = row['group']?.trim();
+
+      if (email && groupName) {
+        if (!groupsMap[groupName]) groupsMap[groupName] = [];
+        groupsMap[groupName].push(email);
+
+        const updatePromise = supabase
+          .from('ss_account')
+          .update({ accountGroup: groupName })
+          .eq('accountEmail', email);
+        updates.push(updatePromise);
+      }
+    }
+
+    // Validate max 5 members per group
+    for (const [groupName, members] of Object.entries(groupsMap)) {
+      if (members.length > 5) {
+        return res.status(400).json({ error: `Group '${groupName}' exceeds the maximum limit of 5 members.` });
+      }
+    }
+
+    await Promise.all(updates);
+
+    await supabase.from('ss_groupings').delete().eq('courseID', courseId);
+    
+    // Delete existing ss_group records dynamically linked to this course's groupings 
+    // (We look up by groupName for simplicity in this demo, but ideally we match course context)
+    const existingGroupingsRes = await supabase.from('ss_groupings').select('groupName').eq('courseID', courseId);
+    if (existingGroupingsRes.data && existingGroupingsRes.data.length > 0) {
+      const gNames = existingGroupingsRes.data.map(g => g.groupName);
+      await supabase.from('ss_group').delete().in('groupName', gNames);
+    }
+
+    const groupingsInsert = [];
+    const ssGroupInsert = [];
+
+    for (const [groupName, members] of Object.entries(groupsMap)) {
+      groupingsInsert.push({
+        groupName: groupName,
+        groupMembers: members.length.toString(),
+        courseID: courseId
+      });
+
+      ssGroupInsert.push({
+        groupName: groupName,
+        member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
+        member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
+        member3: members[2] || null, roleThree: members[2] ? 'member' : null,
+        member4: members[3] || null, roleFour: members[3] ? 'member' : null,
+        member5: members[4] || null, roleFive: members[4] ? 'member' : null,
+      });
+    }
+
+    if (groupingsInsert.length > 0) {
+      const { error: groupErr } = await supabase.from('ss_groupings').insert(groupingsInsert);
+      if (groupErr) throw new Error(`Grouping Insert Failed: ${groupErr.message}`);
+    }
+
+    if (ssGroupInsert.length > 0) {
+      const { error: ssGroupErr } = await supabase.from('ss_group').insert(ssGroupInsert);
+      if (ssGroupErr) throw new Error(`ss_group Insert Failed: ${ssGroupErr.message}`);
+    }
+
+    return res.json({ success: true, message: `Successfully imported ${Object.keys(groupsMap).length} groups from the Sheet!` });
+
+  } catch (error: any) {
+    if (error?.response?.status === 404 || error?.response?.status === 403) {
+      return res.status(400).json({ error: "Cannot access this Sheet. Please ensure 'Anyone with the link' can View it!" });
+    }
+    return res.status(500).json({ error: error?.message || "Failed to parse spreadsheet." });
+  }
+});
+
+app.post('/api/courses/:id/groups', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  const courseId = req.params.id;
+  const { groupName, members } = req.body; // members is array of emails, max 5, index 0 is leader
+
+  if (!groupName || !members || !Array.isArray(members) || members.length === 0) {
+    return res.status(400).json({ error: "Missing groupName or members" });
+  }
+
+  if (members.length > 5) {
+    return res.status(400).json({ error: "A group can have a maximum of 5 members" });
+  }
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+
+    // Insert to ss_groupings
+    const { error: groupingErr } = await supabase
+      .from('ss_groupings')
+      .insert([{
+        groupName,
+        groupMembers: members.length.toString(),
+        courseID: courseId
+      }]);
+    
+    if (groupingErr) throw groupingErr;
+
+    // Insert to ss_group
+    const { data: newGroup, error: ssGroupErr } = await supabase
+      .from('ss_group')
+      .insert([{
+        groupName,
+        member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
+        member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
+        member3: members[2] || null, roleThree: members[2] ? 'member' : null,
+        member4: members[3] || null, roleFour: members[3] ? 'member' : null,
+        member5: members[4] || null, roleFive: members[4] ? 'member' : null,
+      }])
+      .select()
+      .single();
+
+    if (ssGroupErr) throw ssGroupErr;
+
+    // Optional: Update user profiles with the new group assigned
+    for (const email of members) {
+      if (email) {
+        await supabase.from('ss_account').update({ accountGroup: groupName }).eq('accountEmail', email);
+      }
+    }
+
+    res.json(newGroup);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err.message || "Failed to create group" });
+  }
+});
+
+// Group Endpoints for Detailed View & Tasks
+app.get('/api/groups/:id', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+
+    // 1. Fetch the group name from ss_groupings using the ID from the URL
+    const { data: grouping, error: groupingError } = await supabase
+      .from('ss_groupings')
+      .select('groupName')
+      .eq('groupID', groupingId)
+      .single();
+    
+    if (groupingError || !grouping) {
+      return res.status(404).json({ error: "Group reference not found" });
+    }
+
+    // 2. Fetch the actual group details from ss_group using the groupName
+    const { data, error } = await supabase
+      .from('ss_group')
+      .select('*')
+      .eq('groupName', grouping.groupName)
+      .single();
+
+    if (error) return res.status(404).json({ error: "Group details not found" });
+    res.json(data);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.get('/api/groups/:id/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+
+    // Find smallgroupID for task linking
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .select('*')
+      .eq('groupID', group.smallgroupID);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || []);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.get('/api/groups/by-name/:name/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupName = req.params.name;
+
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('smallgroupID')
+      .eq('groupName', groupName)
+      .single();
+      
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .select('*')
+      .eq('groupID', group.smallgroupID);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || []);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.post('/api/groups/:id/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+    const { taskTitle, taskAssign, taskDeadline, taskInfo } = req.body;
+
+    if (!taskTitle || !taskAssign || !taskDeadline) {
+      return res.status(400).json({ error: "Missing required task fields" });
+    }
+
+    // Find smallgroupID for task linking
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .insert([{
+        groupID: group.smallgroupID,
+        taskTitle,
+        taskAssign,
+        taskDeadline,
+        taskInfo
+      }])
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+  } catch (err) {
+    res.sendStatus(403);
   }
 });
 
@@ -933,19 +979,29 @@ app.post('/api/courses', verifyInstructor, async (req, res) => {
     return res.status(400).json({ error: "Missing course details" });
   }
 
+  // Generate 8-character random alphanumeric key
   const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789';
-  let courseKey = Array.from({ length: 8 }, () => chars.charAt(Math.floor(Math.random() * chars.length))).join('');
-
-  try {
-    const { rows } = await pool.query(
-      `INSERT INTO ss_courses ("courseName", "courseCode", "courseSection", "courseTerm", "courseKey", "courseAmount", "courseAdviser") 
-       VALUES ($1, $2, $3, $4, $5, 0, $6) RETURNING *`,
-      [courseName, courseCode, courseSection, courseTerm, courseKey, user.email]
-    );
-    res.json(rows[0]);
-  } catch (error: any) {
-    res.status(500).json({ error: error.message });
+  let courseKey = '';
+  for (let i = 0; i < 8; i++) {
+    courseKey += chars.charAt(Math.floor(Math.random() * chars.length));
   }
+
+  const { data, error } = await supabase
+    .from('ss_courses')
+    .insert([{
+      courseName,
+      courseCode,
+      courseSection,
+      courseTerm,
+      courseKey,
+      courseAmount: 0,
+      courseAdviser: user.email // Associate with the creator
+    }])
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
 });
 
 app.post('/api/enroll', async (req, res) => {
@@ -959,159 +1015,43 @@ app.post('/api/enroll', async (req, res) => {
   try {
     const user: any = jwt.verify(token, process.env.JWT_SECRET || "test");
 
-    const crsRes = await pool.query('SELECT id, "courseAmount" FROM ss_courses WHERE "courseKey" = $1', [courseKey]);
-    const course = crsRes.rows[0];
+    // 1. Find the course matching the key
+    const { data: course, error: fetchError } = await supabase
+      .from('ss_courses')
+      .select('id, courseAmount')
+      .eq('courseKey', courseKey)
+      .single();
 
-    if (!course) return res.status(404).json({ error: "Invalid course key" });
+    if (fetchError || !course) {
+      return res.status(404).json({ error: "Invalid course key" });
+    }
 
-    try {
-      await pool.query('INSERT INTO ss_enrollments (account_id, course_id) VALUES ($1, $2)', [user.id, course.id]);
-      await pool.query('UPDATE ss_courses SET "courseAmount" = "courseAmount" + 1 WHERE id = $1', [course.id]);
-      return res.json({ success: true, message: "Successfully enrolled!" });
-    } catch (enrollError: any) {
-      if (enrollError.code === '23505') {
+    // 2. Insert enrollment record
+    const { error: enrollError } = await supabase
+      .from('ss_enrollments')
+      .insert([{
+        account_id: user.id,
+        course_id: course.id
+      }]);
+
+    // Handle uniqueness constraints if Student already joined (Assuming composite unique key on DB)
+    if (enrollError) {
+      if (enrollError.code === '23505') { // Code for unique_violation
         return res.status(400).json({ error: "You are already enrolled in this course." });
       }
-      throw enrollError;
+      return res.status(500).json({ error: enrollError.message });
     }
+
+    // 3. Increment course member amount visually
+    await supabase
+      .from('ss_courses')
+      .update({ courseAmount: course.courseAmount + 1 })
+      .eq('id', course.id);
+
+    return res.json({ success: true, message: "Successfully enrolled!" });
+
   } catch (err) {
     return res.status(401).json({ error: "Invalid session token" });
-  }
-});
-
-// ================================================================
-// WORKSPACE SYNC — Connected Sheets
-// ================================================================
-
-app.post('/api/courses/:id/connect-sheet', verifyInstructor, async (req, res) => {
-  const courseId = req.params.id;
-  const { sheetUrl } = req.body;
-  if (!sheetUrl) return res.status(400).json({ error: 'Missing sheet URL' });
-
-  const match = sheetUrl.match(/\/d\/(.*?)\//);
-  if (!match?.[1]) return res.status(400).json({ error: 'Invalid Google Sheets URL' });
-  const sheetId = match[1];
-
-  try {
-    let sheetName = 'Connected Sheet';
-    try {
-      const metaRes = await axios.get(
-        `https://sheets.googleapis.com/v4/spreadsheets/${sheetId}?fields=properties.title&key=`,
-        { validateStatus: () => true }
-      );
-      sheetName = metaRes.data?.properties?.title || sheetName;
-    } catch { }
-
-    try {
-      const { rows } = await pool.query(
-        'INSERT INTO ss_connected_sheets ("courseID", "sheetId", "sheetName") VALUES ($1, $2, $3) RETURNING *',
-        [courseId, sheetId, sheetName]
-      );
-      return res.json({ success: true, sheet: rows[0] });
-    } catch (error: any) {
-      if (error.code === '23505') return res.status(400).json({ error: 'Sheet already connected to this course' });
-      throw error;
-    }
-  } catch (err: any) {
-    return res.status(500).json({ error: err.message || 'Failed to connect sheet' });
-  }
-});
-
-app.get('/api/courses/:id/sheets', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-
-  try {
-    jwt.verify(token, process.env.JWT_SECRET || 'test');
-    const { rows } = await pool.query('SELECT * FROM ss_connected_sheets WHERE "courseID" = $1 ORDER BY created_at DESC', [req.params.id]);
-
-    const sheets = rows.map((s: any) => ({
-      id: s.id,
-      sheetId: s.sheetId,
-      sheetName: s.sheetName,
-      courseId: s.courseID,
-      createdAt: s.created_at,
-      groupCount: s.groupCount || 0
-    }));
-
-    return res.json({ sheets });
-  } catch {
-    return res.status(403).json({ error: 'Unauthorized' });
-  }
-});
-
-app.delete('/api/connected-sheets/:id', verifyInstructor, async (req, res) => {
-  try {
-    await pool.query('DELETE FROM ss_connected_sheets WHERE id = $1', [req.params.id]);
-    return res.json({ success: true });
-  } catch (error: any) {
-    return res.status(500).json({ error: error.message });
-  }
-});
-
-// ================================================================
-// GOOGLE DRIVE & SHEETS API
-// ================================================================
-
-const getAccessToken = async (token: string): Promise<string | null> => {
-  try {
-    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'test');
-    const { rows } = await pool.query('SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1', [decoded.id]);
-    return rows[0]?.googleAccessToken || null;
-  } catch {
-    return null;
-  }
-};
-
-app.get('/api/drive/files', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-  const accessToken = await getAccessToken(token);
-  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
-
-  try {
-    const response = await axios.get(
-      'https://www.googleapis.com/drive/v3/files?pageSize=50&fields=files(id,name,mimeType,modifiedTime,size)',
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    return res.json({ files: response.data.files || [] });
-  } catch (err: any) {
-    return res.status(500).json({ error: 'Failed to fetch Drive files. Ensure Drive API is enabled and scopes are approved.' });
-  }
-});
-
-app.get('/api/drive/folders', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-  const accessToken = await getAccessToken(token);
-  if (!accessToken) return res.status(403).json({ error: 'No Google access token.' });
-
-  try {
-    const response = await axios.get(
-      `https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.folder%27&pageSize=50&fields=files(id,name)`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    return res.json({ folders: response.data.files || [] });
-  } catch (err: any) {
-    return res.status(500).json({ error: 'Failed to fetch Drive folders.' });
-  }
-});
-
-app.get('/api/sheets/list', async (req, res) => {
-  const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.sendStatus(401);
-  const accessToken = await getAccessToken(token);
-  if (!accessToken) return res.status(403).json({ error: 'No Google access token.' });
-
-  try {
-    const response = await axios.get(
-      `https://www.googleapis.com/drive/v3/files?q=mimeType%3D%27application%2Fvnd.google-apps.spreadsheet%27&pageSize=50&orderBy=modifiedTime%20desc&fields=files(id,name,modifiedTime,owners)`,
-      { headers: { Authorization: `Bearer ${accessToken}` } }
-    );
-    return res.json({ files: response.data.files || [] });
-  } catch (err: any) {
-    return res.status(500).json({ error: 'Failed to fetch Sheets.' });
   }
 });
 
@@ -1128,6 +1068,17 @@ app.get('/api/me', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
+// Global error handler to catch OAuth token errors
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Express Error:', err.message || err);
+  if (err.name === 'TokenError') {
+    // If authorization fails (e.g. wrong client secret or expired code), redirect back with error
+    return res.redirect('http://localhost:3000/login?error=GoogleAuthFailed');
+  }
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
 });

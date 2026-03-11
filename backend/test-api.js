@@ -1,13 +1,19 @@
-import jwt from 'jsonwebtoken';
-import 'dotenv/config';
+import axios from 'axios';
 
-const token = jwt.sign(
-    { id: 3, email: 'student@example.com', role: 'Student' },
-    process.env.JWT_SECRET || 'test',
-    { expiresIn: '1h' }
-);
+async function check() {
+  try {
+    const res = await axios.get('http://localhost:5000/api/groups/1', {
+      headers: { Authorization: 'Bearer test' }
+    });
+    console.log(res.data);
+  } catch (err) {
+    if (err.response) {
+       console.error("STATUS:", err.response.status);
+       console.error("BODY:", err.response.data);
+    } else {
+       console.error(err.message);
+    }
+  }
+}
 
-fetch('http://localhost:5000/api/courses', {
-    headers: { Authorization: `Bearer ${token}` }
-}).then(res => res.json()).then(data => console.log('Courses:', data))
-    .catch(err => console.error('Error:', err));
+check();

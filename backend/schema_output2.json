@@ -1,0 +1,6 @@
+{
+  "code": "42703",
+  "details": null,
+  "hint": null,
+  "message": "column ss_participation.nonexistent_column does not exist"
+}
