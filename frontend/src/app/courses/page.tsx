@@ -196,36 +196,53 @@ export default function CoursesPage() {
 
                 {/* Courses Grid */}
                 {filteredCourses.length > 0 ? (
-                    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
-                        {filteredCourses.map((course, idx) => (
-                            <Link href={`/courses/${course.id}`} key={idx} className="glass-card p-5 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 group">
-                                <div className="flex items-start justify-between mb-4">
-                                    <div className="p-2.5 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-md">
-                                        <BookOpen className="w-5 h-5 text-white" />
-                                    </div>
-                                    <button
-                                        onClick={e => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(course.courseKey); showToast('Course key copied!'); }}
-                                        className="p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
-                                        title="Copy course key"
-                                    >
-                                        <Copy className="w-4 h-4" />
-                                    </button>
-                                </div>
+                    <div className="space-y-8">
+                        {Object.entries(
+                            filteredCourses.reduce((acc, course) => {
+                                const code = course.courseCode || 'Other Section';
+                                if (!acc[code]) acc[code] = [];
+                                acc[code].push(course);
+                                return acc;
+                            }, {} as Record<string, Course[]>)
+                        ).map(([code, coursesInCode]) => (
+                            <div key={code} className="bg-white/50 border border-gray-100 rounded-[20px] p-6 shadow-sm">
+                                <h2 className="text-xl font-bold text-gray-800 mb-5 flex items-center gap-2">
+                                    <BookOpen className="w-5 h-5 text-blue-500" />
+                                    {code} Teams
+                                </h2>
+                                <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-5">
+                                    {coursesInCode.map((course, idx) => (
+                                        <Link href={`/courses/${course.id}`} key={idx} className="glass-card p-5 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1 group">
+                                            <div className="flex items-start justify-between mb-4">
+                                                <div className="p-2.5 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-md">
+                                                    <BookOpen className="w-5 h-5 text-white" />
+                                                </div>
+                                                <button
+                                                    onClick={e => { e.preventDefault(); e.stopPropagation(); navigator.clipboard.writeText(course.courseKey); showToast('Course key copied!'); }}
+                                                    className="p-2 text-gray-400 hover:text-blue-500 hover:bg-blue-50 rounded-lg transition-colors"
+                                                    title="Copy course key"
+                                                >
+                                                    <Copy className="w-4 h-4" />
+                                                </button>
+                                            </div>
 
-                                <h3 className="font-bold text-gray-800 text-lg group-hover:text-blue-600 transition-colors mb-1">
-                                    {course.courseName}
-                                </h3>
-                                <p className="text-sm text-gray-500 mb-1">{course.courseCode} · {course.courseSection}</p>
-                                <p className="text-xs text-gray-400 mb-4">{course.courseTerm}</p>
+                                            <h3 className="font-bold text-gray-800 text-lg group-hover:text-blue-600 transition-colors mb-1">
+                                                {course.courseName}
+                                            </h3>
+                                            <p className="text-sm text-gray-500 mb-1">{course.courseCode} · {course.courseSection}</p>
+                                            <p className="text-xs text-gray-400 mb-4">{course.courseTerm}</p>
 
-                                <div className="flex items-center justify-between pt-3 border-t border-gray-100">
-                                    <div className="flex items-center gap-1.5 text-sm text-gray-500">
-                                        <Users className="w-4 h-4" />
-                                        <span>{course.courseAmount || 0} students</span>
-                                    </div>
-                                    <span className="text-xs text-gray-400 uppercase font-medium tracking-wider">{course.courseAdviser?.split('@')[0]}</span>
+                                            <div className="flex items-center justify-between pt-3 border-t border-gray-100">
+                                                <div className="flex items-center gap-1.5 text-sm text-gray-500">
+                                                    <Users className="w-4 h-4" />
+                                                    <span>{course.courseAmount || 0} students</span>
+                                                </div>
+                                                <span className="text-xs text-gray-400 uppercase font-medium tracking-wider">{course.courseAdviser?.split('@')[0]}</span>
+                                            </div>
+                                        </Link>
+                                    ))}
                                 </div>
-                            </Link>
+                            </div>
                         ))}
                     </div>
                 ) : (

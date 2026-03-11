@@ -70,7 +70,7 @@ export default function WorkspaceSyncPage() {
     const [showImportModal, setShowImportModal] = useState(false);
     const [pendingSheet, setPendingSheet] = useState<DriveSheet | null>(null);
     const [importing, setImporting] = useState(false);
-    const [importResult, setImportResult] = useState<{ type: 'success' | 'error'; message: string } | null>(null);
+    const [importResult, setImportResult] = useState<{ type: 'success' | 'error' | 'conflict'; message: string; existingCourses?: any[] } | null>(null);
     const [importedCourses, setImportedCourses] = useState<any[]>([]);
 
     // Embedded viewer
@@ -158,18 +158,20 @@ export default function WorkspaceSyncPage() {
         setShowImportModal(true);
     };
 
-    const importSheet = async () => {
+    const importSheet = async (forceReplace = false) => {
         if (!pendingSheet) return;
         setImporting(true);
-        setImportResult(null);
-        setImportedCourses([]);
+        if (!forceReplace) {
+            setImportResult(null);
+            setImportedCourses([]);
+        }
 
         const token = localStorage.getItem('auth_token');
         try {
             const res = await fetch(`${API_URL}/api/import-from-sheet`, {
                 method: 'POST',
                 headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json' },
-                body: JSON.stringify({ sheetId: pendingSheet.id })
+                body: JSON.stringify({ sheetId: pendingSheet.id, forceReplace })
             });
             const data = await res.json();
 
@@ -180,6 +182,8 @@ export default function WorkspaceSyncPage() {
                 const t = localStorage.getItem('auth_token') || '';
                 fetchCourses(t);
                 showToast(data.message);
+            } else if (res.status === 409) {
+                setImportResult({ type: 'conflict', message: data.message, existingCourses: data.existingCourses });
             } else {
                 setImportResult({ type: 'error', message: data.error || 'Import failed' });
             }
@@ -486,7 +490,7 @@ export default function WorkspaceSyncPage() {
 
                         {/* Result */}
                         {importResult && (
-                            <div className={`mb-4 p-3 rounded-xl text-sm flex items-start gap-2 ${importResult.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
+                            <div className={`mb-4 p-3 rounded-xl text-sm flex items-start gap-2 ${importResult.type === 'success' ? 'bg-green-50 border border-green-200 text-green-700' : importResult.type === 'conflict' ? 'bg-amber-50 border border-amber-200 text-amber-700' : 'bg-red-50 border border-red-200 text-red-700'}`}>
                                 {importResult.type === 'success' ? <Check className="w-4 h-4 mt-0.5 flex-shrink-0" /> : <AlertCircle className="w-4 h-4 mt-0.5 flex-shrink-0" />}
                                 <span>{importResult.message}</span>
                             </div>
@@ -507,11 +511,19 @@ export default function WorkspaceSyncPage() {
 
                         <div className="flex gap-3">
                             <button onClick={() => setShowImportModal(false)} className="flex-1 py-3 border border-gray-200 text-gray-600 rounded-xl font-medium hover:bg-gray-50 text-sm transition">
-                                {importResult?.type === 'success' ? 'Close' : 'Cancel'}
+                                {importResult?.type === 'success' ? 'Close' : importResult?.type === 'conflict' ? 'Skip' : 'Cancel'}
                             </button>
-                            {!importResult?.type && (
+                            {importResult?.type === 'conflict' ? (
                                 <button
-                                    onClick={importSheet}
+                                    onClick={() => importSheet(true)}
+                                    disabled={importing}
+                                    className="flex-1 py-3 bg-gradient-to-r from-red-500 to-rose-500 text-white rounded-xl font-medium hover:shadow-lg transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
+                                >
+                                    {importing ? <><Loader2 className="w-4 h-4 animate-spin" /> Replacing...</> : 'Replace'}
+                                </button>
+                            ) : !importResult?.type || importResult?.type === 'error' ? (
+                                <button
+                                    onClick={() => importSheet(false)}
                                     disabled={importing}
                                     className="flex-1 py-3 bg-gradient-to-r from-purple-500 to-pink-500 text-white rounded-xl font-medium hover:shadow-lg transition-all text-sm disabled:opacity-50 flex items-center justify-center gap-2"
                                 >
@@ -520,7 +532,7 @@ export default function WorkspaceSyncPage() {
                                         : <><Upload className="w-4 h-4" /> Import Teams</>
                                     }
                                 </button>
-                            )}
+                            ) : null}
                         </div>
                     </div>
                 </div>

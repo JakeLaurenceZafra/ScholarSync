@@ -7,13 +7,17 @@ import axios from 'axios';
 import { jwtDecode } from 'jwt-decode';
 
 type Group = {
-    smallgroupID: number;
+    groupID?: number;
+    smallgroupID?: number; 
     groupName: string;
-    member1: string | null; roleOne: string | null;
-    member2: string | null; roleTwo: string | null;
-    member3: string | null; roleThree: string | null;
-    member4: string | null; roleFour: string | null;
-    member5: string | null; roleFive: string | null;
+    team_number?: number;
+    proposed_project?: string;
+    adviser?: string;
+    member1: string | null; roleOne: string | null; nameOne?: string | null;
+    member2: string | null; roleTwo: string | null; nameTwo?: string | null;
+    member3: string | null; roleThree: string | null; nameThree?: string | null;
+    member4: string | null; roleFour: string | null; nameFour?: string | null;
+    member5: string | null; roleFive: string | null; nameFive?: string | null;
 };
 
 type Task = {
@@ -131,11 +135,11 @@ export default function GroupPage() {
 
     // Determine memberships
     const membersList = [
-        { email: group.member1, role: group.roleOne },
-        { email: group.member2, role: group.roleTwo },
-        { email: group.member3, role: group.roleThree },
-        { email: group.member4, role: group.roleFour },
-        { email: group.member5, role: group.roleFive },
+        { email: group.member1, role: group.roleOne, name: group.nameOne },
+        { email: group.member2, role: group.roleTwo, name: group.nameTwo },
+        { email: group.member3, role: group.roleThree, name: group.nameThree },
+        { email: group.member4, role: group.roleFour, name: group.nameFour },
+        { email: group.member5, role: group.roleFive, name: group.nameFive },
     ].filter(m => m.email); // Filter out empty slots
 
     const isLeader = membersList.some(m => m.email === user?.email && m.role === 'leader');
@@ -148,104 +152,215 @@ export default function GroupPage() {
                 <main className="flex-1 p-8 max-w-7xl mx-auto w-full">
                     
                     {/* Header */}
-                    <div className="mb-8 flex items-center justify-between">
-                        <div>
-                            <button 
-                                onClick={() => router.push(`/courses/${courseId}`)}
-                                className="text-gray-500 text-sm font-semibold hover:text-indigo-600 mb-2 flex items-center gap-1"
-                            >
-                                ← Back to Course
-                            </button>
-                            <h1 className="text-3xl font-bold text-gray-900">{group.groupName}</h1>
+                    <div className="mb-6 flex flex-col justify-start">
+                        <button 
+                            onClick={() => router.push(`/courses/${courseId}`)}
+                            className="text-gray-500 text-sm font-semibold hover:text-indigo-600 mb-4 flex items-center gap-1 w-fit"
+                        >
+                            ← Back to Course
+                        </button>
+                        <div className="flex items-center gap-3 mb-2">
+                             <div className="text-[13px] font-bold text-indigo-500 uppercase tracking-widest">
+                                TEAM {String(group.team_number || group.groupName.replace('Group ', '')).padStart(2, '0')}
+                             </div>
+                             <div className="flex items-center gap-2 text-[13px] font-bold text-slate-400">
+                                 <span>•</span>
+                                 <span>{courseId.toUpperCase()}</span>
+                             </div>
                         </div>
+                        <h1 className="text-2xl font-bold text-slate-800 tracking-tight leading-snug">
+                            {group.proposed_project || group.groupName}
+                        </h1>
+                        <p className="text-sm text-slate-500 mt-2 font-medium">
+                            {group.groupName} • {courseId.toUpperCase()}
+                        </p>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
+                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mt-8">
                         
-                        {/* Left Container: Members */}
-                        <div className="lg:col-span-1 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col">
-                            <div className="bg-[#4FB6DF] p-4 border-b border-gray-100 flex justify-between items-center">
-                                <h2 className="font-bold text-white text-lg">Members ({membersList.length}/5)</h2>
+                        {/* Left Container: Team Info & Members */}
+                        <div className="lg:col-span-4 flex flex-col gap-6">
+                            
+                            {/* Team Info */}
+                            <div>
+                                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Team Info</h2>
+                                <div className="flex items-start gap-4 mb-4">
+                                     <div className="mt-1">
+                                          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
+                                              <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
+                                          </svg>
+                                     </div>
+                                     <div>
+                                         <div className="text-xs text-slate-500 font-medium">Adviser</div>
+                                         <div className="text-sm font-bold text-slate-800">{group.adviser || 'TBI'}</div>
+                                     </div>
+                                </div>
+                                <div className="text-[13px] text-slate-500 font-medium mb-8">
+                                    {courseId.toUpperCase()}
+                                </div>
                             </div>
-                            <div className="p-4 flex-1 overflow-y-auto w-full">
+                            
+                            {/* Members */}
+                            <div>
+                                <div className="flex justify-between items-center mb-4">
+                                    <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Members ({membersList.length})</h2>
+                                    {isAdmin && (
+                                        <button className="text-xs font-bold text-indigo-500 bg-indigo-50 hover:bg-indigo-100 px-3 py-1 rounded-md transition-colors flex items-center gap-1">
+                                            + Add
+                                        </button>
+                                    )}
+                                </div>
                                 {membersList.length > 0 ? (
                                     <div className="flex flex-col gap-3">
-                                        {membersList.map((member, idx) => (
-                                            <div key={idx} className="flex items-center justify-between p-3 rounded-lg border border-gray-100 bg-gray-50/50">
-                                                <div className="flex flex-col truncate pr-2">
-                                                    <span className="font-semibold text-sm text-gray-800 truncate" title={member.email!}>{member.email}</span>
+                                        {membersList.map((member, idx) => {
+                                            const colors = ['bg-green-500', 'bg-blue-500', 'bg-purple-500', 'bg-pink-500', 'bg-amber-500'];
+                                            const bgColor = colors[idx % colors.length];
+                                            const initial = member.name ? member.name.charAt(0).toUpperCase() : (member.email ? member.email.charAt(0).toUpperCase() : '?');
+                                            
+                                            return (
+                                                <div key={idx} className="flex items-center justify-between p-4 rounded-xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all group">
+                                                    <div className="flex items-center gap-3 overflow-hidden">
+                                                        <div className={`w-10 h-10 ${bgColor} text-white rounded-full flex items-center justify-center font-bold flex-shrink-0 text-lg`}>
+                                                            {initial}
+                                                        </div>
+                                                        <div className="flex flex-col truncate pr-2">
+                                                            <div className="flex items-center gap-2">
+                                                                <span className="font-bold text-sm text-slate-800 truncate">{member.name || member.email?.split('@')[0]}</span>
+                                                                {member.role === 'leader' && (
+                                                                    <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
+                                                                        Leader
+                                                                    </span>
+                                                                )}
+                                                            </div>
+                                                            <span className="text-xs text-slate-400 truncate">{member.email}</span>
+                                                        </div>
+                                                    </div>
+                                                    {isAdmin && (
+                                                        <button className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1">
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
+                                                            </svg>
+                                                        </button>
+                                                    )}
                                                 </div>
-                                                <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-full ${member.role === 'leader' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
-                                                    {member.role}
-                                                </span>
-                                            </div>
-                                        ))}
+                                            );
+                                        })}
                                     </div>
                                 ) : (
-                                    <p className="text-gray-500 italic text-sm">No members configured.</p>
+                                    <p className="text-slate-500 italic text-sm bg-slate-50 p-4 rounded-xl border border-slate-200 text-center">No members assigned.</p>
                                 )}
+                            </div>
+                            
+                            {/* Discussion Stub */}
+                            <div className="mt-4">
+                                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Discussion</h2>
+                                <div className="bg-slate-50 border border-slate-200 rounded-xl p-8 text-center flex flex-col items-center justify-center min-h-[150px]">
+                                    <p className="text-sm font-medium text-slate-400 mb-4">No comments yet</p>
+                                </div>
+                                <div className="mt-3 relative">
+                                    <input 
+                                        type="text" 
+                                        placeholder="Write a comment..." 
+                                        className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-4 pr-12 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 transition-all shadow-sm"
+                                    />
+                                    <button className="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 hover:bg-blue-600 text-white p-1.5 rounded-lg transition-colors">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
+                                            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
+                                        </svg>
+                                    </button>
+                                </div>
                             </div>
                         </div>
 
-                        {/* Right Container: Tasks & Journals */}
-                        <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col min-h-[400px]">
+                        {/* Right Container: Activity & Data */}
+                        <div className="lg:col-span-8 flex flex-col gap-6 lg:border-l lg:border-slate-200 lg:pl-8">
                             
-                            <div className="bg-[#0095FF] flex justify-between items-center px-4 w-full">
-                                <div className="flex items-center pt-2">
+                            <div className="flex justify-between items-center border-b border-slate-200 pb-px">
+                                <div className="flex items-center gap-6">
                                     <button 
                                         onClick={() => setActiveTab('tasks')}
-                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'tasks' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
+                                        className={`pb-3 text-[13px] font-bold tracking-wide relative transition-colors ${activeTab === 'tasks' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}
                                     >
-                                        Group Tasks
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block mr-1.5 align-text-bottom" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                                        </svg>
+                                        Progress & Tasks
+                                        {activeTab === 'tasks' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-blue-600 rounded-t-full"></div>}
                                     </button>
                                     <button 
                                         onClick={() => setActiveTab('journals')}
-                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'journals' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
+                                        className={`pb-3 text-[13px] font-bold tracking-wide relative transition-colors ${activeTab === 'journals' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}
                                     >
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block mr-1.5 align-text-bottom" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                                        </svg>
                                         Journals
+                                        {activeTab === 'journals' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-blue-600 rounded-t-full"></div>}
                                     </button>
                                 </div>
                                 {activeTab === 'tasks' && canCreateTasks && (
                                     <button 
                                         onClick={() => setShowTaskModal(true)}
-                                        className="bg-white text-[#0095FF] px-4 py-1.5 rounded text-sm font-bold shadow hover:bg-gray-50 transition-colors my-2"
+                                        className="text-emerald-600 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-4 py-1.5 rounded-lg text-[13px] font-bold transition-colors mb-2 flex items-center gap-1.5"
                                     >
-                                        + Add Task
+                                        <span>+ Add Task</span>
                                     </button>
                                 )}
                             </div>
 
-                            <div className="p-6 flex-1 overflow-y-auto w-full max-h-[600px]">
+                            <div className="flex-1 w-full pb-10">
                                 {activeTab === 'tasks' && (
-                                    tasks.length > 0 ? (
-                                        <div className="grid gap-4">
-                                            {tasks.map(task => (
-                                                <div key={task.taskID} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow relative overflow-hidden group">
-                                                    <div className="absolute left-0 top-0 bottom-0 w-1 bg-[#0095FF]"></div>
-                                                    <div className="flex justify-between items-start mb-2">
-                                                        <h3 className="font-bold text-lg text-gray-800 break-words max-w-[70%]">{task.taskTitle}</h3>
-                                                        <div className="text-xs font-semibold px-2 py-1 bg-red-50 text-red-600 rounded whitespace-nowrap">
-                                                            Due: {task.taskDeadline || 'No date'}
-                                                        </div>
-                                                    </div>
-                                                    {task.taskInfo && (
-                                                        <p className="text-gray-600 text-sm mb-4 line-clamp-3">{task.taskInfo}</p>
-                                                    )}
-                                                    <div className="flex items-center gap-2 mt-auto">
-                                                        <span className="text-xs font-medium text-gray-500">Assigned to:</span>
-                                                        <span className="text-xs font-bold text-[#0095FF] bg-blue-50 px-2 py-1 rounded-full">{task.taskAssign}</span>
-                                                    </div>
+                                    <>
+                                        {/* Abstracted Progress View (Placeholder matching screenshot) */}
+                                        <div className="border border-slate-200 rounded-xl p-8 flex flex-col items-center justify-center bg-white shadow-sm mb-6">
+                                            <h3 className="text-sm font-bold text-slate-500 mb-6">Team Progress</h3>
+                                            
+                                            <div className="w-32 h-32 rounded-full border-[6px] border-slate-100 border-t-red-500 flex items-center justify-center relative shadow-inner mb-6">
+                                                <div className="absolute top-1 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-red-500 rounded-full border-2 border-white"></div>
+                                                <span className="text-3xl font-black text-red-500">0%</span>
+                                            </div>
+
+                                            <div className="flex justify-center gap-10">
+                                                <div className="text-center">
+                                                    <div className="text-xl font-bold text-green-500">0</div>
+                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">Done</div>
                                                 </div>
-                                            ))}
+                                                <div className="text-center">
+                                                    <div className="text-xl font-bold text-amber-500">0</div>
+                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">In Progress</div>
+                                                </div>
+                                                <div className="text-center">
+                                                    <div className="text-xl font-bold text-slate-400">0</div>
+                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">Pending</div>
+                                                </div>
+                                            </div>
                                         </div>
-                                    ) : (
-                                        <div className="h-full flex flex-col items-center justify-center text-gray-400 py-12">
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
-                                            </svg>
-                                            <p>No tasks created yet.</p>
-                                        </div>
-                                    )
+
+                                        {/* Actual Tasks mapping below progress */}
+                                        {tasks.length > 0 ? (
+                                             <div className="grid gap-4">
+                                                 {tasks.map(task => (
+                                                     <div key={task.taskID} className="border border-gray-200 rounded-xl p-5 hover:shadow-md transition-shadow relative overflow-hidden group bg-white">
+                                                         <div className="flex justify-between items-start mb-2">
+                                                             <h3 className="font-bold text-base text-gray-800 break-words max-w-[70%]">{task.taskTitle}</h3>
+                                                             <div className="text-xs font-semibold px-2 py-1 bg-slate-100 text-slate-600 rounded whitespace-nowrap">
+                                                                 Due: {task.taskDeadline || 'No date'}
+                                                             </div>
+                                                         </div>
+                                                         {task.taskInfo && (
+                                                             <p className="text-gray-500 text-sm mb-4 line-clamp-3">{task.taskInfo}</p>
+                                                         )}
+                                                         <div className="flex items-center gap-2 mt-auto">
+                                                             <div className="w-6 h-6 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-[10px] font-bold">
+                                                                {task.taskAssign.charAt(0).toUpperCase()}
+                                                             </div>
+                                                             <span className="text-xs font-bold text-slate-600">{task.taskAssign}</span>
+                                                         </div>
+                                                     </div>
+                                                 ))}
+                                             </div>
+                                        ) : null}
+                                    </>
                                 )}
 
                                 {activeTab === 'journals' && (

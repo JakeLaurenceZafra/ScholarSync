@@ -5,74 +5,227 @@ import { useRouter } from 'next/navigation';
 import SidebarLayout from '@/components/SidebarLayout';
 import Link from 'next/link';
 import { jwtDecode } from 'jwt-decode';
-import GoogleCalendarWidget from '@/components/GoogleCalendarWidget';
+import { API_URL } from '@/lib/api';
+import {
+  BookOpen,
+  Users,
+  Layers,
+  TrendingUp,
+  FolderOpen,
+  FileSpreadsheet,
+  ArrowRight,
+  Calendar
+} from 'lucide-react';
 
 export default function DashboardPage() {
   const [user, setUser] = useState<any>(null);
-  const [isAdmin, setIsAdmin] = useState(false);
-  const [menuOpen, setMenuOpen] = useState(false);
+  const [courses, setCourses] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const router = useRouter();
 
   useEffect(() => {
     const token = localStorage.getItem('auth_token');
     if (!token) {
       router.push('/login');
-    } else {
-      try {
-        const decoded: any = jwtDecode(token);
-        setUser(decoded);
-        if (decoded.role === 'Admin') {
-          setIsAdmin(true);
-        }
-      } catch (err) {
-        router.push('/login');
-      }
+      return;
+    }
+
+    try {
+      const decoded: any = jwtDecode(token);
+      setUser(decoded);
+      fetchDashboardData(token);
+    } catch (err) {
+      router.push('/login');
     }
   }, [router]);
 
-  if (!user) {
-    return <div className="min-h-screen bg-white"></div>;
+  const fetchDashboardData = async (token: string) => {
+    try {
+      const res = await fetch(`${API_URL}/api/courses`, {
+        headers: { Authorization: `Bearer ${token}` }
+      });
+      if (res.ok) {
+        const data = await res.json();
+        setCourses(data || []);
+      }
+    } catch (err) {
+      console.error('Failed to fetch dashboard data:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  if (!user || loading) {
+    return (
+      <SidebarLayout>
+        <div className="flex items-center justify-center h-[60vh]">
+          <div className="animate-spin rounded-full h-12 w-12 border-4 border-blue-500 border-t-transparent" />
+        </div>
+      </SidebarLayout>
+    );
   }
+
+  const isAdmin = user.role === 'Admin';
+  const isInstructor = user.role === 'Admin' || user.role === 'Advisers';
 
   return (
     <SidebarLayout>
-      {/* Main Content Area */}
-      <div className="w-full h-full bg-slate-50 p-8 relative min-h-screen">
-        
-        {/* Top Right Header Action Area */}
-        <div className="absolute top-8 right-8 z-10 flex flex-col items-end">
-          <GoogleCalendarWidget />
+      <div className="max-w-7xl mx-auto px-4 sm:px-6 lg:px-8 py-8">
+        {/* Header */}
+        <div className="mb-8 animate-fade-in">
+          <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
+            Dashboard
+          </h1>
+          <p className="text-gray-600 mt-2 text-lg">
+            Welcome back, <span className="font-semibold">{user.email?.split('@')[0]}</span>
+            <span className="text-gray-400"> · {user.role}</span>
+          </p>
         </div>
 
-      </div>
+        {/* Stats Grid */}
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
+          <div className="glass-card p-6 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-md">
+                <BookOpen className="w-5 h-5 text-white" />
+              </div>
+              <span className="text-sm font-semibold text-gray-700">Courses</span>
+            </div>
+            <p className="text-3xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">
+              {courses.length}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">
+              {isInstructor ? 'Courses managed' : 'Enrolled courses'}
+            </p>
+          </div>
 
-      {/* Floating Admin Button */}
-      {isAdmin && (
-        <div className="fixed bottom-8 right-8 flex flex-col items-end gap-4 z-50">
-          {menuOpen && (
-            <div className="bg-white border border-gray-200 shadow-lg rounded-lg p-2 flex flex-col mb-2 animate-in fade-in slide-in-from-bottom-5">
-              <Link
-                href="/admin/accounts"
-                className="px-6 py-2 text-sm font-medium text-gray-700 hover:bg-gray-50 hover:text-indigo-600 rounded transition-colors"
-                onClick={() => setMenuOpen(false)}
-              >
-                Accounts
-              </Link>
+          <div className="glass-card p-6 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2 bg-gradient-to-br from-green-500 to-emerald-500 rounded-xl shadow-md">
+                <Users className="w-5 h-5 text-white" />
+              </div>
+              <span className="text-sm font-semibold text-gray-700">Students</span>
+            </div>
+            <p className="text-3xl font-bold bg-gradient-to-r from-green-600 to-emerald-600 bg-clip-text text-transparent">
+              {courses.reduce((sum: number, c: any) => sum + (c.courseAmount || 0), 0)}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">Total enrolled</p>
+          </div>
+
+          <div className="glass-card p-6 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2 bg-gradient-to-br from-purple-500 to-pink-500 rounded-xl shadow-md">
+                <Layers className="w-5 h-5 text-white" />
+              </div>
+              <span className="text-sm font-semibold text-gray-700">Sections</span>
+            </div>
+            <p className="text-3xl font-bold bg-gradient-to-r from-purple-600 to-pink-600 bg-clip-text text-transparent">
+              {new Set(courses.map((c: any) => c.courseSection)).size}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">Unique sections</p>
+          </div>
+
+          <div className="glass-card p-6 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
+            <div className="flex items-center gap-3 mb-3">
+              <div className="p-2 bg-gradient-to-br from-orange-500 to-red-500 rounded-xl shadow-md">
+                <TrendingUp className="w-5 h-5 text-white" />
+              </div>
+              <span className="text-sm font-semibold text-gray-700">Term</span>
+            </div>
+            <p className="text-xl font-bold bg-gradient-to-r from-orange-600 to-red-600 bg-clip-text text-transparent">
+              {courses[0]?.courseTerm || 'No Term'}
+            </p>
+            <p className="text-xs text-gray-500 mt-1">Current semester</p>
+          </div>
+        </div>
+
+        {/* Quick Actions */}
+        <div className="glass-card p-6 mb-8">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent mb-6">
+            Quick Actions
+          </h2>
+          <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+            <Link
+              href="/courses"
+              className="flex items-center gap-3 p-4 border border-gray-200 rounded-xl hover:bg-gradient-to-r hover:from-blue-500 hover:to-cyan-500 hover:border-transparent transition-all duration-300 group hover:shadow-md"
+            >
+              <BookOpen className="w-5 h-5 text-blue-600 group-hover:text-white transition-colors" />
+              <div>
+                <p className="font-semibold text-gray-800 group-hover:text-white transition-colors">View Courses</p>
+                <p className="text-xs text-gray-500 group-hover:text-white/80 transition-colors">Manage your courses</p>
+              </div>
+              <ArrowRight className="w-4 h-4 text-gray-400 group-hover:text-white ml-auto transition-colors" />
+            </Link>
+
+            <Link
+              href="/drive"
+              className="flex items-center gap-3 p-4 border border-gray-200 rounded-xl hover:bg-gradient-to-r hover:from-blue-500 hover:to-cyan-500 hover:border-transparent transition-all duration-300 group hover:shadow-md"
+            >
+              <FolderOpen className="w-5 h-5 text-blue-600 group-hover:text-white transition-colors" />
+              <div>
+                <p className="font-semibold text-gray-800 group-hover:text-white transition-colors">Google Drive</p>
+                <p className="text-xs text-gray-500 group-hover:text-white/80 transition-colors">Browse your files</p>
+              </div>
+              <ArrowRight className="w-4 h-4 text-gray-400 group-hover:text-white ml-auto transition-colors" />
+            </Link>
+
+            <Link
+              href="/sheets"
+              className="flex items-center gap-3 p-4 border border-gray-200 rounded-xl hover:bg-gradient-to-r hover:from-blue-500 hover:to-cyan-500 hover:border-transparent transition-all duration-300 group hover:shadow-md"
+            >
+              <FileSpreadsheet className="w-5 h-5 text-blue-600 group-hover:text-white transition-colors" />
+              <div>
+                <p className="font-semibold text-gray-800 group-hover:text-white transition-colors">Google Sheets</p>
+                <p className="text-xs text-gray-500 group-hover:text-white/80 transition-colors">View spreadsheets</p>
+              </div>
+              <ArrowRight className="w-4 h-4 text-gray-400 group-hover:text-white ml-auto transition-colors" />
+            </Link>
+          </div>
+        </div>
+
+        {/* Recent Courses */}
+        <div className="glass-card p-6">
+          <h2 className="text-2xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent mb-6">
+            {isInstructor ? 'Your Courses' : 'Enrolled Courses'}
+          </h2>
+          {courses.length > 0 ? (
+            <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-4">
+              {courses.slice(0, 6).map((course: any) => (
+                <Link
+                  key={course.id}
+                  href={`/courses/${course.id}`}
+                  className="p-4 border border-gray-200 rounded-xl hover:shadow-md hover:border-blue-200 transition-all duration-300 group"
+                >
+                  <div className="flex items-start justify-between mb-3">
+                    <div className="p-2 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-lg">
+                      <BookOpen className="w-4 h-4 text-white" />
+                    </div>
+                    <span className="text-xs font-medium px-2 py-1 bg-blue-50 text-blue-600 rounded-full">
+                      {course.courseSection}
+                    </span>
+                  </div>
+                  <h3 className="font-semibold text-gray-800 group-hover:text-blue-600 transition-colors mb-1">
+                    {course.courseName}
+                  </h3>
+                  <p className="text-sm text-gray-500">{course.courseCode} · {course.courseTerm}</p>
+                  <div className="flex items-center gap-1 mt-3 text-xs text-gray-400">
+                    <Users className="w-3 h-3" />
+                    <span>{course.courseAmount || 0} students</span>
+                  </div>
+                </Link>
+              ))}
+            </div>
+          ) : (
+            <div className="text-center py-12">
+              <Calendar className="w-12 h-12 text-gray-300 mx-auto mb-4" />
+              <p className="text-gray-500 font-medium">No courses yet</p>
+              <p className="text-sm text-gray-400 mt-1">
+                {isInstructor ? 'Create your first course to get started' : 'Enroll in a course using a course key'}
+              </p>
             </div>
           )}
-
-          <button
-            onClick={() => setMenuOpen(!menuOpen)}
-            className="w-14 h-14 bg-indigo-600 text-white rounded-full shadow-lg flex items-center justify-center hover:bg-indigo-700 hover:scale-105 transition-all outline-none focus:ring-4 focus:ring-indigo-300"
-            aria-label="Admin Menu"
-          >
-            <svg xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24" strokeWidth={2} stroke="currentColor" className="w-6 h-6">
-              <path strokeLinecap="round" strokeLinejoin="round" d="M10.325 4.317c.426-1.756 2.924-1.756 3.35 0a1.724 1.724 0 002.573 1.066c1.543-.94 3.31.826 2.37 2.37a1.724 1.724 0 001.065 2.572c1.756.426 1.756 2.924 0 3.35a1.724 1.724 0 00-1.066 2.573c.94 1.543-.826 3.31-2.37 2.37a1.724 1.724 0 00-2.572 1.065c-.426 1.756-2.924 1.756-3.35 0a1.724 1.724 0 00-2.573-1.066c-1.543.94-3.31-.826-2.37-2.37a1.724 1.724 0 00-1.065-2.572c-1.756-.426-1.756-2.924 0-3.35a1.724 1.724 0 001.066-2.573c-.94-1.543.826-3.31 2.37-2.37.996.608 2.296.07 2.572-1.065z" />
-              <path strokeLinecap="round" strokeLinejoin="round" d="M15 12a3 3 0 11-6 0 3 3 0 016 0z" />
-            </svg>
-          </button>
         </div>
-      )}
+      </div>
     </SidebarLayout>
   );
 }
