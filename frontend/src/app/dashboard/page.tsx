@@ -5,6 +5,7 @@ import { useRouter } from 'next/navigation';
 import SidebarLayout from '@/components/SidebarLayout';
 import Link from 'next/link';
 import { jwtDecode } from 'jwt-decode';
+import GoogleCalendarWidget from '@/components/GoogleCalendarWidget';
 
 export default function DashboardPage() {
   const [user, setUser] = useState<any>(null);
@@ -35,8 +36,14 @@ export default function DashboardPage() {
 
   return (
     <SidebarLayout>
-      {/* Main Content Area empty canvas */}
-      <div className="w-full h-full bg-white p-8">
+      {/* Main Content Area */}
+      <div className="w-full h-full bg-slate-50 p-8 relative min-h-screen">
+        
+        {/* Top Right Header Action Area */}
+        <div className="absolute top-8 right-8 z-10 flex flex-col items-end">
+          <GoogleCalendarWidget />
+        </div>
+
       </div>
 
       {/* Floating Admin Button */}

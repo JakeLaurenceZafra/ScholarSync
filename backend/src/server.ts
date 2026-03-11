@@ -352,6 +352,330 @@ app.get('/api/courses/:id/groupings', async (req, res) => {
   }
 });
 
+app.get('/api/courses/:id/consultations', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    const user: any = jwt.verify(token, process.env.JWT_SECRET || "test");
+    const courseId = req.params.id;
+
+    let query = supabase
+      .from('ss_consultation')
+      .select('*')
+      .eq('courseID', courseId);
+
+    // If user is a student, only show published consultations
+    if (user.role === 'Student') {
+      query = query.eq('isDraft', false);
+    }
+
+    const { data, error } = await query;
+
+    if (error) return res.status(500).json({ error: error.message });
+    return res.json(data || []);
+  } catch (err) {
+    return res.sendStatus(403);
+  }
+});
+
+app.post('/api/courses/:id/consultations', verifyInstructor, async (req, res) => {
+  const courseId = req.params.id;
+  const { conDate, conType, conMil, conSum, isDraft, conStat, groupName } = req.body;
+
+  if (!conDate || !conType || !conMil || !conStat || !groupName) {
+    return res.status(400).json({ error: "Missing required consultation details" });
+  }
+
+  let attendeesStr = '';
+  let actionsStr = '';
+
+  if (groupName) {
+    // Find all users assigned to this group
+    const { data: students } = await supabase
+      .from('ss_account')
+      .select('accountName')
+      .eq('accountGroup', groupName);
+
+    if (students && students.length > 0) {
+      attendeesStr = students.map(s => s.accountName).join(', ');
+    }
+
+    // Fetch tasks for the group to auto-populate conAction
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', groupName).single();
+    if (group) {
+        const { data: tasks } = await supabase.from('ss_grouptasks').select('taskTitle').eq('groupID', group.smallgroupID);
+        if (tasks && tasks.length > 0) {
+            actionsStr = tasks.map(t => `- ${t.taskTitle}`).join('\n');
+        }
+    }
+  }
+
+  const { data, error } = await supabase
+    .from('ss_consultation')
+    .insert([{
+      courseID: courseId,
+      groupName,
+      conDate,
+      conType,
+      conMil,
+      conSum: conSum || '',
+      conAction: actionsStr,
+      conAtt: attendeesStr,
+      isDraft: isDraft || false,
+      conStat
+    }])
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+app.put('/api/consultations/:id', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName } = req.body;
+
+  const { data, error } = await supabase
+    .from('ss_consultation')
+    .update({
+      conDate,
+      conType,
+      conMil,
+      conSum,
+      conAction,
+      isDraft,
+      conStat,
+      groupName
+    })
+    .eq('conID', conID)
+    .select()
+    .single();
+
+  if (error) return res.status(500).json({ error: error.message });
+  res.json(data);
+});
+
+// GET existing attendance record
+app.get('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+
+  try {
+    const { data: record, error } = await supabase
+      .from('ss_attendance')
+      .select('*')
+      .eq('conID', conID)
+      .single();
+
+    if (error || !record) return res.json(null);
+
+    // Collect IDs
+    const idList = [
+      record.oneID, record.twoID, record.threeID, record.fourID, record.fiveID
+    ].filter(Boolean);
+
+    if (idList.length === 0) return res.json({});
+
+    // Fetch matching accounts to translate ID -> Name
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountName')
+      .in('account_id', idList);
+
+    const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+
+    const attendanceMap: Record<string, string> = {};
+    const extract = (idVal: number | null, statusVal: string | null) => {
+      if (idVal && accountMap.has(idVal)) {
+        attendanceMap[accountMap.get(idVal)!] = statusVal || 'Present';
+      }
+    };
+
+    extract(record.oneID, record.mem1);
+    extract(record.twoID, record.mem2);
+    extract(record.threeID, record.mem3);
+    extract(record.fourID, record.mem4);
+    extract(record.fiveID, record.mem5);
+
+    res.json(attendanceMap);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPSERT attendance record
+app.put('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { groupName, attendance } = req.body; // attendance is Record<string, 'Present' | 'Absent'>
+
+  if (!groupName || !attendance) return res.status(400).json({ error: "Missing required properties." });
+
+  try {
+    // 1. Get Group Structure
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('member1, member2, member3, member4, member5')
+      .eq('groupName', groupName)
+      .single();
+
+    if (!group) return res.status(404).json({ error: "Linked group not found" });
+
+    // 2. Map Emails to Account IDs via ss_account
+    const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountEmail, accountName')
+      .in('accountEmail', emailList);
+
+    const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
+
+    // Helper to get ID and Status
+    const getDetails = (email: string | null) => {
+      if (!email || !accountByEmail.has(email)) return { id: null, status: null };
+      const acct = accountByEmail.get(email)!;
+      return { id: acct.account_id, status: attendance[acct.accountName] || 'Present' };
+    };
+
+    const m1 = getDetails(group.member1);
+    const m2 = getDetails(group.member2);
+    const m3 = getDetails(group.member3);
+    const m4 = getDetails(group.member4);
+    const m5 = getDetails(group.member5);
+
+    const upsertPayload = {
+      conID,
+      oneID: m1.id, mem1: m1.status,
+      twoID: m2.id, mem2: m2.status,
+      threeID: m3.id, mem3: m3.status,
+      fourID: m4.id, mem4: m4.status,
+      fiveID: m5.id, mem5: m5.status
+    };
+
+    // Use conID as conflict resolution key if supported, otherwise update or insert
+    const { data: existing } = await supabase.from('ss_attendance').select('attID').eq('conID', conID).single();
+
+    if (existing) {
+      await supabase.from('ss_attendance').update(upsertPayload).eq('conID', conID);
+    } else {
+      await supabase.from('ss_attendance').insert([upsertPayload]);
+    }
+
+    res.json({ message: "Attendance saved successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// GET existing participation record
+app.get('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+
+  try {
+    const { data: record, error } = await supabase
+      .from('ss_participation')
+      .select('*')
+      .eq('conID', conID)
+      .single();
+
+    if (error || !record) return res.json(null);
+
+    // Collect IDs
+    const idList = [
+      record.mem1, record.mem2, record.mem3, record.mem4, record.mem5
+    ].filter(Boolean);
+
+    if (idList.length === 0) return res.json({});
+
+    // Fetch matching accounts to translate ID -> Name
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountName')
+      .in('account_id', idList);
+
+    const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+
+    const participationMap: Record<string, string> = {};
+    const extract = (idVal: number | null, ratingVal: string | null) => {
+      if (idVal && accountMap.has(idVal)) {
+        participationMap[accountMap.get(idVal)!] = ratingVal || 'Moderate';
+      }
+    };
+
+    extract(record.mem1, record.part1);
+    extract(record.mem2, record.part2);
+    extract(record.mem3, record.part3);
+    extract(record.mem4, record.part4);
+    extract(record.mem5, record.part5);
+
+    res.json(participationMap);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+// UPSERT participation record
+app.put('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
+  const conID = req.params.id;
+  const { groupName, participation } = req.body; // participation is Record<string, 'High' | 'Moderate' | 'Low'>
+
+  if (!groupName || !participation) return res.status(400).json({ error: "Missing required properties." });
+
+  try {
+    // 1. Get Group Structure
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('member1, member2, member3, member4, member5')
+      .eq('groupName', groupName)
+      .single();
+
+    if (!group) return res.status(404).json({ error: "Linked group not found" });
+
+    // 2. Map Emails to Account IDs via ss_account
+    const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
+    const { data: accounts } = await supabase
+      .from('ss_account')
+      .select('account_id, accountEmail, accountName')
+      .in('accountEmail', emailList);
+
+    const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
+
+    // Helper to get ID and Rating
+    const getDetails = (email: string | null) => {
+      if (!email || !accountByEmail.has(email)) return { id: null, rating: null };
+      const acct = accountByEmail.get(email)!;
+      return { id: acct.account_id, rating: participation[acct.accountName] || 'Moderate' };
+    };
+
+    const m1 = getDetails(group.member1);
+    const m2 = getDetails(group.member2);
+    const m3 = getDetails(group.member3);
+    const m4 = getDetails(group.member4);
+    const m5 = getDetails(group.member5);
+
+    const upsertPayload = {
+      conID,
+      mem1: m1.id, part1: m1.rating,
+      mem2: m2.id, part2: m2.rating,
+      mem3: m3.id, part3: m3.rating,
+      mem4: m4.id, part4: m4.rating,
+      mem5: m5.id, part5: m5.rating
+    };
+
+    const { data: existing } = await supabase.from('ss_participation').select('partID').eq('conID', conID).single();
+
+    if (existing) {
+      await supabase.from('ss_participation').update(upsertPayload).eq('conID', conID);
+    } else {
+      await supabase.from('ss_participation').insert([upsertPayload]);
+    }
+
+    res.json({ message: "Participation saved successfully" });
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 
@@ -362,78 +686,288 @@ app.post('/api/courses/:id/import-groups', verifyInstructor, async (req, res) =>
   if (!sheetUrl) return res.status(400).json({ error: "Missing Google Sheets URL" });
 
   try {
-    // 1. Extract the actual Google Sheet ID from URL (Format: https://docs.google.com/spreadsheets/d/{ID}/edit)
     const match = sheetUrl.match(/\/d\/(.*?)\//);
     if (!match || !match[1]) {
       return res.status(400).json({ error: "Invalid Google Sheets link. Please ensure it is the full URL." });
     }
     const sheetId = match[1];
 
-    // 2. Fetch the raw CSV data using Google's open export API
     const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
     const response = await axios.get(csvUrl);
     const csvData = response.data;
 
-    // 3. Parse CSV mapping Headers to Object Keys (Throws if CSV is improperly formatted)
     const records = parse(csvData, {
       columns: true,
       skip_empty_lines: true,
     });
 
-    // We expect headers: Full name, Email, group. 
-    // Build a map of groups and count their members simultaneously
-    const groupCounts: { [key: string]: number } = {};
+    const groupsMap: { [key: string]: string[] } = {};
     const updates = [];
 
-    // 4. Update the account profiles iteratively based on the Email column mapping to their Group
     for (const row of records as any[]) {
-      // Keys are exact to user prompt: row['Email'], row['group']
       const email = row['Email']?.trim();
       const groupName = row['group']?.trim();
 
       if (email && groupName) {
-        // Track the total size of this unique group
-        groupCounts[groupName] = (groupCounts[groupName] || 0) + 1;
+        if (!groupsMap[groupName]) groupsMap[groupName] = [];
+        groupsMap[groupName].push(email);
 
-        // Push an async update to Supabase ss_account patching this individual user!
         const updatePromise = supabase
           .from('ss_account')
           .update({ accountGroup: groupName })
           .eq('accountEmail', email);
-
         updates.push(updatePromise);
       }
     }
 
-    // Await all the user account global profile patch requests simultaneously
+    // Validate max 5 members per group
+    for (const [groupName, members] of Object.entries(groupsMap)) {
+      if (members.length > 5) {
+        return res.status(400).json({ error: `Group '${groupName}' exceeds the maximum limit of 5 members.` });
+      }
+    }
+
     await Promise.all(updates);
 
-    // 5. Build Groupings metadata rows for the `ss_groupings` table
-    const groupingsInsert = Object.keys(groupCounts).map(groupName => ({
-      groupName: groupName,
-      groupMembers: (groupCounts[groupName] || 0).toString(), // Defaulting natively guarding compilation warning
-      courseID: courseId
-    }));
-
-    // Before inserting, scrub previous groupings on this course to avoid duplicates re-running the Import
     await supabase.from('ss_groupings').delete().eq('courseID', courseId);
+    
+    // Delete existing ss_group records dynamically linked to this course's groupings 
+    // (We look up by groupName for simplicity in this demo, but ideally we match course context)
+    const existingGroupingsRes = await supabase.from('ss_groupings').select('groupName').eq('courseID', courseId);
+    if (existingGroupingsRes.data && existingGroupingsRes.data.length > 0) {
+      const gNames = existingGroupingsRes.data.map(g => g.groupName);
+      await supabase.from('ss_group').delete().in('groupName', gNames);
+    }
 
-    // Insert new groups
+    const groupingsInsert = [];
+    const ssGroupInsert = [];
+
+    for (const [groupName, members] of Object.entries(groupsMap)) {
+      groupingsInsert.push({
+        groupName: groupName,
+        groupMembers: members.length.toString(),
+        courseID: courseId
+      });
+
+      ssGroupInsert.push({
+        groupName: groupName,
+        member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
+        member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
+        member3: members[2] || null, roleThree: members[2] ? 'member' : null,
+        member4: members[3] || null, roleFour: members[3] ? 'member' : null,
+        member5: members[4] || null, roleFive: members[4] ? 'member' : null,
+      });
+    }
+
     if (groupingsInsert.length > 0) {
-      const { error: groupErr } = await supabase
-        .from('ss_groupings')
-        .insert(groupingsInsert);
-
+      const { error: groupErr } = await supabase.from('ss_groupings').insert(groupingsInsert);
       if (groupErr) throw new Error(`Grouping Insert Failed: ${groupErr.message}`);
     }
 
-    return res.json({ success: true, message: `Successfully imported ${Object.keys(groupCounts).length} groups from the Sheet!` });
+    if (ssGroupInsert.length > 0) {
+      const { error: ssGroupErr } = await supabase.from('ss_group').insert(ssGroupInsert);
+      if (ssGroupErr) throw new Error(`ss_group Insert Failed: ${ssGroupErr.message}`);
+    }
+
+    return res.json({ success: true, message: `Successfully imported ${Object.keys(groupsMap).length} groups from the Sheet!` });
 
   } catch (error: any) {
     if (error?.response?.status === 404 || error?.response?.status === 403) {
       return res.status(400).json({ error: "Cannot access this Sheet. Please ensure 'Anyone with the link' can View it!" });
     }
     return res.status(500).json({ error: error?.message || "Failed to parse spreadsheet." });
+  }
+});
+
+app.post('/api/courses/:id/groups', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  const courseId = req.params.id;
+  const { groupName, members } = req.body; // members is array of emails, max 5, index 0 is leader
+
+  if (!groupName || !members || !Array.isArray(members) || members.length === 0) {
+    return res.status(400).json({ error: "Missing groupName or members" });
+  }
+
+  if (members.length > 5) {
+    return res.status(400).json({ error: "A group can have a maximum of 5 members" });
+  }
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+
+    // Insert to ss_groupings
+    const { error: groupingErr } = await supabase
+      .from('ss_groupings')
+      .insert([{
+        groupName,
+        groupMembers: members.length.toString(),
+        courseID: courseId
+      }]);
+    
+    if (groupingErr) throw groupingErr;
+
+    // Insert to ss_group
+    const { data: newGroup, error: ssGroupErr } = await supabase
+      .from('ss_group')
+      .insert([{
+        groupName,
+        member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
+        member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
+        member3: members[2] || null, roleThree: members[2] ? 'member' : null,
+        member4: members[3] || null, roleFour: members[3] ? 'member' : null,
+        member5: members[4] || null, roleFive: members[4] ? 'member' : null,
+      }])
+      .select()
+      .single();
+
+    if (ssGroupErr) throw ssGroupErr;
+
+    // Optional: Update user profiles with the new group assigned
+    for (const email of members) {
+      if (email) {
+        await supabase.from('ss_account').update({ accountGroup: groupName }).eq('accountEmail', email);
+      }
+    }
+
+    res.json(newGroup);
+  } catch (err: any) {
+    console.error(err);
+    res.status(500).json({ error: err.message || "Failed to create group" });
+  }
+});
+
+// Group Endpoints for Detailed View & Tasks
+app.get('/api/groups/:id', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+
+    // 1. Fetch the group name from ss_groupings using the ID from the URL
+    const { data: grouping, error: groupingError } = await supabase
+      .from('ss_groupings')
+      .select('groupName')
+      .eq('groupID', groupingId)
+      .single();
+    
+    if (groupingError || !grouping) {
+      return res.status(404).json({ error: "Group reference not found" });
+    }
+
+    // 2. Fetch the actual group details from ss_group using the groupName
+    const { data, error } = await supabase
+      .from('ss_group')
+      .select('*')
+      .eq('groupName', grouping.groupName)
+      .single();
+
+    if (error) return res.status(404).json({ error: "Group details not found" });
+    res.json(data);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.get('/api/groups/:id/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+
+    // Find smallgroupID for task linking
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .select('*')
+      .eq('groupID', group.smallgroupID);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || []);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.get('/api/groups/by-name/:name/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupName = req.params.name;
+
+    const { data: group } = await supabase
+      .from('ss_group')
+      .select('smallgroupID')
+      .eq('groupName', groupName)
+      .single();
+      
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .select('*')
+      .eq('groupID', group.smallgroupID);
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data || []);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+app.post('/api/groups/:id/tasks', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = req.params.id;
+    const { taskTitle, taskAssign, taskDeadline, taskInfo } = req.body;
+
+    if (!taskTitle || !taskAssign || !taskDeadline) {
+      return res.status(400).json({ error: "Missing required task fields" });
+    }
+
+    // Find smallgroupID for task linking
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .insert([{
+        groupID: group.smallgroupID,
+        taskTitle,
+        taskAssign,
+        taskDeadline,
+        taskInfo
+      }])
+      .select()
+      .single();
+
+    if (error) return res.status(500).json({ error: error.message });
+    res.json(data);
+  } catch (err) {
+    res.sendStatus(403);
   }
 });
 
@@ -534,6 +1068,17 @@ app.get('/api/me', (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
+
+// Global error handler to catch OAuth token errors
+app.use((err: any, req: express.Request, res: express.Response, next: express.NextFunction) => {
+  console.error('Express Error:', err.message || err);
+  if (err.name === 'TokenError') {
+    // If authorization fails (e.g. wrong client secret or expired code), redirect back with error
+    return res.redirect('http://localhost:3000/login?error=GoogleAuthFailed');
+  }
+  res.status(500).json({ error: "Internal Server Error" });
+});
+
 app.listen(PORT, () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
 });
