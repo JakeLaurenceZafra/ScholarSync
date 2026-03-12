@@ -17,7 +17,8 @@ import {
     X,
     ChevronDown,
     GraduationCap,
-    Shield
+    Shield,
+    CalendarDays
 } from 'lucide-react';
 
 interface SidebarLayoutProps {
@@ -53,6 +54,7 @@ export default function SidebarLayout({ children }: SidebarLayoutProps) {
     const navItems = [
         { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
         { href: '/courses', label: 'Courses', icon: BookOpen },
+        { href: '/calendar', label: 'Calendar', icon: CalendarDays },
         { href: '/workspace-sync', label: 'Workspace Sync', icon: FolderSync },
     ];
 

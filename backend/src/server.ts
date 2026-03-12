@@ -7,6 +7,7 @@ import 'dotenv/config';
 import pg from 'pg';
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
+import { google } from 'googleapis';
 
 const { Pool } = pg;
 
@@ -63,7 +64,9 @@ app.get('/auth/google',
       'https://www.googleapis.com/auth/drive.readonly',
       'https://www.googleapis.com/auth/drive.file',
       'https://www.googleapis.com/auth/spreadsheets.readonly',
-      'https://www.googleapis.com/auth/spreadsheets'
+      'https://www.googleapis.com/auth/spreadsheets',
+      'https://www.googleapis.com/auth/calendar',
+      'https://www.googleapis.com/auth/calendar.events'
     ],
     accessType: 'offline',
     prompt: 'consent'
@@ -1354,6 +1357,146 @@ app.get('/api/me', (req, res) => {
     if (err) return res.sendStatus(403);
     res.json(user);
   });
+});
+
+// ================================================================
+// GOOGLE CALENDAR API
+// ================================================================
+
+const getCalendarClient = (accessToken: string) => {
+  const auth = new google.auth.OAuth2(
+    process.env.GOOGLE_CLIENT_ID,
+    process.env.GOOGLE_CLIENT_SECRET
+  );
+  auth.setCredentials({ access_token: accessToken });
+  return google.calendar({ version: 'v3', auth });
+};
+
+// GET /api/calendar/events — fetch upcoming events (90-day window)
+app.get('/api/calendar/events', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+  const accessToken = await getAccessToken(token);
+  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
+
+  try {
+    const calendar = getCalendarClient(accessToken);
+    const timeMin = new Date().toISOString();
+    const timeMax = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+
+    const response = await calendar.events.list({
+      calendarId: 'primary',
+      timeMin,
+      timeMax,
+      singleEvents: true,
+      orderBy: 'startTime',
+      maxResults: 100,
+    });
+
+    return res.json({ events: response.data.items || [] });
+  } catch (err: any) {
+    console.error('Error fetching calendar events:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch calendar events.' });
+  }
+});
+
+// POST /api/calendar/events — create a new event
+app.post('/api/calendar/events', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+  const accessToken = await getAccessToken(token);
+  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
+
+  try {
+    const { title, description, location, startTime, endTime, allDay, attendees } = req.body;
+    const calendar = getCalendarClient(accessToken);
+
+    const start = allDay
+      ? { date: new Date(startTime).toISOString().split('T')[0] }
+      : { dateTime: new Date(startTime).toISOString(), timeZone: 'Asia/Manila' };
+    const end = allDay
+      ? { date: new Date(endTime).toISOString().split('T')[0] }
+      : { dateTime: new Date(endTime).toISOString(), timeZone: 'Asia/Manila' };
+
+    const response = await calendar.events.insert({
+      calendarId: 'primary',
+      resource: {
+        summary: title,
+        description,
+        location,
+        start,
+        end,
+        attendees: attendees || [],
+      },
+    } as any);
+
+    return res.json({ event: response.data });
+  } catch (err: any) {
+    console.error('Error creating calendar event:', err.message);
+    return res.status(500).json({ error: 'Failed to create calendar event.' });
+  }
+});
+
+// PUT /api/calendar/events/:eventId — update an existing event
+app.put('/api/calendar/events/:eventId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+  const accessToken = await getAccessToken(token);
+  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
+
+  try {
+    const { eventId } = req.params;
+    const { title, description, location, startTime, endTime, allDay, attendees } = req.body;
+    const calendar = getCalendarClient(accessToken);
+
+    const start = allDay
+      ? { date: new Date(startTime).toISOString().split('T')[0] }
+      : { dateTime: new Date(startTime).toISOString(), timeZone: 'Asia/Manila' };
+    const end = allDay
+      ? { date: new Date(endTime).toISOString().split('T')[0] }
+      : { dateTime: new Date(endTime).toISOString(), timeZone: 'Asia/Manila' };
+
+    const response = await calendar.events.update({
+      calendarId: 'primary',
+      eventId,
+      resource: {
+        summary: title,
+        description,
+        location,
+        start,
+        end,
+        attendees: attendees || [],
+      },
+    } as any);
+
+    return res.json({ event: response.data });
+  } catch (err: any) {
+    console.error('Error updating calendar event:', err.message);
+    return res.status(500).json({ error: 'Failed to update calendar event.' });
+  }
+});
+
+// DELETE /api/calendar/events/:eventId — delete an event
+app.delete('/api/calendar/events/:eventId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+  const accessToken = await getAccessToken(token);
+  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
+
+  try {
+    const { eventId } = req.params;
+    const calendar = getCalendarClient(accessToken);
+
+    await calendar.events.delete({
+      calendarId: 'primary',
+      eventId,
+    });
+
+    return res.json({ success: true });
+  } catch (err: any) {
+    console.error('Error deleting calendar event:', err.message);
+    return res.status(500).json({ error: 'Failed to delete calendar event.' });
+  }
 });
 
 const PORT = process.env.PORT || 5000;
