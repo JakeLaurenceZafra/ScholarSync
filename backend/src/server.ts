@@ -12,7 +12,23 @@ import { google } from 'googleapis';
 const { Pool } = pg;
 
 // Use SkyFlow's PostgreSQL database as the primary DB now
-const pool = new Pool({ connectionString: process.env.SKYFLOW_DATABASE_URL });
+// Using explicit params instead of connection string to avoid pg URL parsing
+// issues with Supabase's dotted username (postgres.projectref)
+// Clear any Docker/system PostgreSQL env vars that override pg Pool config
+delete process.env.PGUSER;
+delete process.env.PGHOST;
+delete process.env.PGPASSWORD;
+delete process.env.PGDATABASE;
+delete process.env.PGPORT;
+
+const pool = new Pool({
+  host: 'aws-1-ap-southeast-2.pooler.supabase.com',
+  port: 6543,
+  database: 'postgres',
+  user: 'postgres.fijnckhquezxpflfzcyk',
+  password: 'pl5OPQRGzZpycNb8',
+  ssl: { rejectUnauthorized: false }
+});
 
 const app = express();
 
