@@ -2,7 +2,7 @@ import fs from 'fs';
 import pg from 'pg';
 
 const { Pool } = pg;
-const pool = new Pool({ connectionString: 'postgresql://postgres.fijnckhquezxpflfzcyk:pl5OPQRGzZpycNb8@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres' });
+const pool = new Pool({ connectionString: 'postgresql://postgres.fijnckhquezxpflfzcyk:ZroqnJyydPs6RkQy@aws-1-ap-southeast-2.pooler.supabase.com:6543/postgres' });
 
 async function runMigration() {
     try {
