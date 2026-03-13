@@ -5,6 +5,7 @@ import jwt from 'jsonwebtoken';
 import { createClient } from '@supabase/supabase-js';
 import cors from 'cors';
 import 'dotenv/config';
+import { GoogleDocsService } from './googleDocsService.js';
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_ANON_KEY!;
@@ -23,7 +24,7 @@ passport.use(new GoogleStrategy({
   clientSecret: process.env.GOOGLE_CLIENT_SECRET!,
   callbackURL: "http://localhost:5000/auth/google/callback"
 },
-  async (accessToken, refreshToken, profile, done) => {
+  async (accessToken: string, refreshToken: string | undefined, profile: any, done: any) => {
     try {
       const email = profile.emails?.[0]?.value;
       const name = profile.displayName;
@@ -33,26 +34,37 @@ passport.use(new GoogleStrategy({
         return done(new Error("No email found from Google profile"));
       }
 
+      // Update or insert user tokens
       const { data: user, error } = await supabase
+        .from('ss_account')
+        .update({ 
+          googleAccessToken: accessToken,
+          googleRefreshToken: refreshToken || undefined // Refresh token is only sent on first consent
+        })
+        .eq('accountEmail', email)
+        .select('*')
+        .single();
+
+      if (error && error.code !== 'PGRST116') { // PGRST116 is 'No rows found'
+        // If the columns don't exist yet, this might fail. 
+        // We'll handle it gracefully for now if the user hasn't run the SQL.
+        console.error("Error updating tokens. Ensure ss_account has googleAccessToken and googleRefreshToken columns.", error.message);
+      }
+
+      const { data: existingUser } = await supabase
         .from('ss_account')
         .select('*')
         .eq('accountEmail', email)
         .single();
 
-      if (error && error.code !== 'PGRST116') { // PGRST116 is 'No rows found'
-        throw new Error(error.message);
-      }
-
-      if (!user) {
+      if (!existingUser) {
         // User does not exist, pass the email forward via a temporary object
         return done(null, { isNew: true, email: email } as any);
       }
 
       // Generate random account_id for legacy/JWT compatibility if not present (assuming UUID typically)
       // We pass the existing user directly
-      return done(null, { ...user, id: user.account_id, email: user.accountEmail } as any);
-
-      return done(null, user);
+      return done(null, { ...existingUser, id: existingUser.account_id, email: existingUser.accountEmail } as any);
     } catch (err) {
       return done(err as Error);
     }
@@ -60,7 +72,16 @@ passport.use(new GoogleStrategy({
 ));
 
 app.get('/auth/google',
-  passport.authenticate('google', { scope: ['profile', 'email'] })
+  passport.authenticate('google', { 
+    scope: [
+      'profile', 
+      'email', 
+      'https://www.googleapis.com/auth/documents', 
+      'https://www.googleapis.com/auth/drive.file'
+    ],
+    accessType: 'offline',
+    prompt: 'consent'
+  })
 );
 
 app.get('/auth/google/callback',
@@ -277,7 +298,7 @@ app.get('/api/courses/:id', async (req, res) => {
   if (!token) return res.sendStatus(401);
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
+    jwt.verify(token as string, process.env.JWT_SECRET || "test");
     const courseId = req.params.id;
 
     const { data, error } = await supabase
@@ -299,7 +320,7 @@ app.get('/api/courses/:id/members', async (req, res) => {
   if (!token) return res.sendStatus(401);
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
+    jwt.verify(token as string, process.env.JWT_SECRET || "test");
     const courseId = req.params.id;
 
     // STEP 1: Get all account_ids enrolled in this course
@@ -337,7 +358,7 @@ app.get('/api/courses/:id/groupings', async (req, res) => {
   if (!token) return res.sendStatus(401);
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
+    jwt.verify(token as string, process.env.JWT_SECRET || "test");
     const courseId = req.params.id;
 
     const { data, error } = await supabase
@@ -380,7 +401,7 @@ app.get('/api/courses/:id/consultations', async (req, res) => {
   }
 });
 
-app.post('/api/courses/:id/consultations', verifyInstructor, async (req, res) => {
+app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express.Request, res: express.Response) => {
   const courseId = req.params.id;
   const { conDate, conType, conMil, conSum, isDraft, conStat, groupName } = req.body;
 
@@ -430,10 +451,21 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req, res) =>
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
+
+  // Archive if published
+  if (data && !data.isDraft) {
+    try {
+      const user = (req as any).user;
+      await GoogleDocsService.archiveConsultation(data, user.email);
+    } catch (archiveError) {
+      console.error("Archive failed:", archiveError);
+    }
+  }
+
   res.json(data);
 });
 
-app.put('/api/consultations/:id', verifyInstructor, async (req, res) => {
+app.put('/api/consultations/:id', verifyInstructor, async (req: express.Request, res: express.Response) => {
   const conID = req.params.id;
   const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName } = req.body;
 
@@ -454,6 +486,17 @@ app.put('/api/consultations/:id', verifyInstructor, async (req, res) => {
     .single();
 
   if (error) return res.status(500).json({ error: error.message });
+
+  // Archive if published
+  if (data && !data.isDraft) {
+    try {
+      const user = (req as any).user;
+      await GoogleDocsService.archiveConsultation(data, user.email);
+    } catch (archiveError) {
+      console.error("Archive failed:", archiveError);
+    }
+  }
+
   res.json(data);
 });
 
@@ -679,6 +722,142 @@ app.put('/api/consultations/:id/participation', verifyInstructor, async (req, re
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 
+async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, saveUrl: boolean = false) {
+  const match = sheetUrl.match(/\/d\/(.*?)\//);
+  if (!match || !match[1]) {
+    throw new Error("Invalid Google Sheets link. Please ensure it is the full URL.");
+  }
+  const sheetId = match[1];
+
+  const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
+  const response = await axios.get(csvUrl);
+  const csvData = response.data;
+
+  const records = parse(csvData, {
+    columns: true,
+    skip_empty_lines: true,
+  });
+
+  const groupsMap: { [key: string]: string[] } = {};
+  const updates = [];
+
+  for (const row of records as any[]) {
+    const email = row['Email']?.trim();
+    const groupName = row['group']?.trim();
+
+    if (email && groupName) {
+      if (!groupsMap[groupName]) groupsMap[groupName] = [];
+      groupsMap[groupName].push(email);
+
+      const updatePromise = supabase
+        .from('ss_account')
+        .update({ accountGroup: groupName })
+        .eq('accountEmail', email);
+      updates.push(updatePromise);
+    }
+  }
+
+  // Validate max 5 members per group
+  for (const [groupName, members] of Object.entries(groupsMap)) {
+    if (members.length > 5) {
+      throw new Error(`Group '${groupName}' exceeds the maximum limit of 5 members.`);
+    }
+  }
+
+  await Promise.all(updates);
+
+  // If saveUrl is true, update the course with the sheetUrl so we can auto-sync it later
+  if (saveUrl) {
+    const { error: courseUpdateError } = await supabase
+      .from('ss_courses')
+      .update({ courseSheetUrl: sheetUrl })
+      .eq('id', courseId);
+    if (courseUpdateError) {
+      console.error(`Failed to save sheetUrl for course ${courseId}:`, courseUpdateError);
+    }
+  }
+
+  await supabase.from('ss_groupings').delete().eq('courseID', courseId);
+  
+  const existingGroupingsRes = await supabase.from('ss_groupings').select('groupName').eq('courseID', courseId);
+  if (existingGroupingsRes.data && existingGroupingsRes.data.length > 0) {
+     // NOTE: This logic seems flawed in original code because we just deleted everything for courseID above
+     // but we'll try to delete related ss_group rows if we can match them. Just keeping logic similar for now.
+     // In a production app, we'd probably want to make sure cascading deletes happen or use a safer transaction.
+     // We will just replace it with looking at the names we are about to insert and overwriting them or deleting old ones.
+  }
+  
+  // Actually, let's delete any group that belongs to this course's *old* groupings. 
+  // Wait, we just deleted the groupings above, so we can't look them up. This was a bug in the old code.
+  // Instead, let's just delete the groups based on the names in groupsMap since we know we are replacing them.
+  const gNames = Object.keys(groupsMap);
+  if (gNames.length > 0) {
+    await supabase.from('ss_group').delete().in('groupName', gNames);
+  }
+
+  const groupingsInsert = [];
+  const ssGroupInsert = [];
+
+  for (const [groupName, members] of Object.entries(groupsMap)) {
+    groupingsInsert.push({
+      groupName: groupName,
+      groupMembers: members.length.toString(),
+      courseID: courseId
+    });
+
+    ssGroupInsert.push({
+      groupName: groupName,
+      member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
+      member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
+      member3: members[2] || null, roleThree: members[2] ? 'member' : null,
+      member4: members[3] || null, roleFour: members[3] ? 'member' : null,
+      member5: members[4] || null, roleFive: members[4] ? 'member' : null,
+    });
+  }
+
+  if (groupingsInsert.length > 0) {
+    const { error: groupErr } = await supabase.from('ss_groupings').insert(groupingsInsert);
+    if (groupErr) throw new Error(`Grouping Insert Failed: ${groupErr.message}`);
+  }
+
+  if (ssGroupInsert.length > 0) {
+    const { error: ssGroupErr } = await supabase.from('ss_group').insert(ssGroupInsert);
+    if (ssGroupErr) throw new Error(`ss_group Insert Failed: ${ssGroupErr.message}`);
+  }
+
+  return Object.keys(groupsMap).length;
+}
+
+// Background auto-sync function. Runs every 10 minutes (600000ms).
+setInterval(async () => {
+  try {
+    const { data: courses, error } = await supabase
+      .from('ss_courses')
+      .select('id, courseSheetUrl')
+      .not('courseSheetUrl', 'is', null);
+
+    if (error) {
+      console.error("Auto-sync: Error fetching courses", error);
+      return;
+    }
+
+    if (!courses || courses.length === 0) return;
+
+    for (const course of courses) {
+      if (course.courseSheetUrl) {
+        try {
+          await syncCourseGroupsFromSheet(course.id.toString(), course.courseSheetUrl, false);
+          console.log(`Auto-synced groups for course ${course.id}`);
+        } catch (err: any) {
+          console.error(`Auto-sync failed for course ${course.id}:`, err?.message);
+        }
+      }
+    }
+  } catch (err) {
+    console.error("Auto-sync: Unhandled error", err);
+  }
+}, 10 * 60 * 1000); // 10 minutes
+
 app.post('/api/courses/:id/import-groups', verifyInstructor, async (req, res) => {
   const { sheetUrl } = req.body;
   const courseId = req.params.id;
@@ -686,90 +865,34 @@ app.post('/api/courses/:id/import-groups', verifyInstructor, async (req, res) =>
   if (!sheetUrl) return res.status(400).json({ error: "Missing Google Sheets URL" });
 
   try {
-    const match = sheetUrl.match(/\/d\/(.*?)\//);
-    if (!match || !match[1]) {
-      return res.status(400).json({ error: "Invalid Google Sheets link. Please ensure it is the full URL." });
+    const groupCount = await syncCourseGroupsFromSheet(courseId as string, sheetUrl as string, true);
+    return res.json({ success: true, message: `Successfully imported and saved Google Sheet for ${groupCount} groups!` });
+
+  } catch (error: any) {
+    if (error?.response?.status === 404 || error?.response?.status === 403) {
+      return res.status(400).json({ error: "Cannot access this Sheet. Please ensure 'Anyone with the link' can View it!" });
     }
-    const sheetId = match[1];
+    return res.status(500).json({ error: error?.message || "Failed to parse spreadsheet." });
+  }
+});
 
-    const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
-    const response = await axios.get(csvUrl);
-    const csvData = response.data;
+app.post('/api/courses/:id/sync-groups', verifyInstructor, async (req, res) => {
+  const courseId = req.params.id;
 
-    const records = parse(csvData, {
-      columns: true,
-      skip_empty_lines: true,
-    });
+  try {
+    // Fetch the URL from db
+    const { data: course, error } = await supabase
+      .from('ss_courses')
+      .select('courseSheetUrl')
+      .eq('id', courseId)
+      .single();
 
-    const groupsMap: { [key: string]: string[] } = {};
-    const updates = [];
-
-    for (const row of records as any[]) {
-      const email = row['Email']?.trim();
-      const groupName = row['group']?.trim();
-
-      if (email && groupName) {
-        if (!groupsMap[groupName]) groupsMap[groupName] = [];
-        groupsMap[groupName].push(email);
-
-        const updatePromise = supabase
-          .from('ss_account')
-          .update({ accountGroup: groupName })
-          .eq('accountEmail', email);
-        updates.push(updatePromise);
-      }
+    if (error || !course || !course.courseSheetUrl) {
+      return res.status(404).json({ error: "No Google Sheet linked to this course. Please import one first." });
     }
 
-    // Validate max 5 members per group
-    for (const [groupName, members] of Object.entries(groupsMap)) {
-      if (members.length > 5) {
-        return res.status(400).json({ error: `Group '${groupName}' exceeds the maximum limit of 5 members.` });
-      }
-    }
-
-    await Promise.all(updates);
-
-    await supabase.from('ss_groupings').delete().eq('courseID', courseId);
-    
-    // Delete existing ss_group records dynamically linked to this course's groupings 
-    // (We look up by groupName for simplicity in this demo, but ideally we match course context)
-    const existingGroupingsRes = await supabase.from('ss_groupings').select('groupName').eq('courseID', courseId);
-    if (existingGroupingsRes.data && existingGroupingsRes.data.length > 0) {
-      const gNames = existingGroupingsRes.data.map(g => g.groupName);
-      await supabase.from('ss_group').delete().in('groupName', gNames);
-    }
-
-    const groupingsInsert = [];
-    const ssGroupInsert = [];
-
-    for (const [groupName, members] of Object.entries(groupsMap)) {
-      groupingsInsert.push({
-        groupName: groupName,
-        groupMembers: members.length.toString(),
-        courseID: courseId
-      });
-
-      ssGroupInsert.push({
-        groupName: groupName,
-        member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
-        member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
-        member3: members[2] || null, roleThree: members[2] ? 'member' : null,
-        member4: members[3] || null, roleFour: members[3] ? 'member' : null,
-        member5: members[4] || null, roleFive: members[4] ? 'member' : null,
-      });
-    }
-
-    if (groupingsInsert.length > 0) {
-      const { error: groupErr } = await supabase.from('ss_groupings').insert(groupingsInsert);
-      if (groupErr) throw new Error(`Grouping Insert Failed: ${groupErr.message}`);
-    }
-
-    if (ssGroupInsert.length > 0) {
-      const { error: ssGroupErr } = await supabase.from('ss_group').insert(ssGroupInsert);
-      if (ssGroupErr) throw new Error(`ss_group Insert Failed: ${ssGroupErr.message}`);
-    }
-
-    return res.json({ success: true, message: `Successfully imported ${Object.keys(groupsMap).length} groups from the Sheet!` });
+    const groupCount = await syncCourseGroupsFromSheet(courseId as string, course.courseSheetUrl as string, false);
+    return res.json({ success: true, message: `Successfully synchronized ${groupCount} groups with the linked Google Sheet!` });
 
   } catch (error: any) {
     if (error?.response?.status === 404 || error?.response?.status === 403) {
@@ -796,7 +919,7 @@ app.post('/api/courses/:id/groups', async (req, res) => {
   }
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
+    jwt.verify(token as string, process.env.JWT_SECRET || "test");
 
     // Insert to ss_groupings
     const { error: groupingErr } = await supabase

@@ -15,6 +15,7 @@ type Course = {
     courseSection: string;
     courseAdviser: string;
     courseTerm: string;
+    courseSheetUrl?: string; // Newly added column from Supabase
 };
 
 type Member = {
@@ -77,6 +78,7 @@ export default function CourseDetailsPage() {
     const [showImportModal, setShowImportModal] = useState(false);
     const [sheetLink, setSheetLink] = useState('');
     const [importing, setImporting] = useState(false);
+    const [syncing, setSyncing] = useState(false);
 
     // Consultation Modal State
     const [showConsultationModal, setShowConsultationModal] = useState(false);
@@ -219,10 +221,20 @@ export default function CourseDetailsPage() {
     };
 
     // Dynamic refetch function block separated mapped for reusing after Sheets import
-    const fetchData = async (token: string) => {
+    const fetchData = async (token: string, shouldSync: boolean = false) => {
         try {
             const courseRes = await axios.get(`http://localhost:5000/api/courses/${params.id}`, { headers: { Authorization: `Bearer ${token}` } });
             setCourse(courseRes.data);
+
+            // Auto-sync Google Sheet quietly, so the latest data is available before we query groupings
+            if (shouldSync && courseRes.data.courseSheetUrl) {
+                try {
+                    await axios.post(`http://localhost:5000/api/courses/${params.id}/sync-groups`, {}, { headers: { Authorization: `Bearer ${token}` } });
+                } catch (syncErr) {
+                    console.error("Auto-sync failed:", syncErr);
+                }
+            }
+
             const membersRes = await axios.get(`http://localhost:5000/api/courses/${params.id}/members`, { headers: { Authorization: `Bearer ${token}` } });
             setMembers(membersRes.data);
             const groupingsRes = await axios.get(`http://localhost:5000/api/courses/${params.id}/groupings`, { headers: { Authorization: `Bearer ${token}` } });
@@ -257,7 +269,14 @@ export default function CourseDetailsPage() {
             return;
         }
 
-        fetchData(token);
+        fetchData(token, true);
+
+        const onFocus = () => {
+             const t = localStorage.getItem('auth_token');
+             if (t) fetchData(t, true);
+        };
+        window.addEventListener('focus', onFocus);
+        return () => window.removeEventListener('focus', onFocus);
     }, [params.id, router]);
 
     const handleImport = async () => {
@@ -285,6 +304,27 @@ export default function CourseDetailsPage() {
             alert(err.response?.data?.error || "An error occurred during import.");
         } finally {
             setImporting(false);
+        }
+    };
+
+    const handleSync = async () => {
+        try {
+            setSyncing(true);
+            const token = localStorage.getItem('auth_token');
+            const res = await axios.post(`http://localhost:5000/api/courses/${params.id}/sync-groups`,
+                {},
+                { headers: { Authorization: `Bearer ${token}` } }
+            );
+
+            alert(res.data.message);
+
+            // Refetch to see the new DB payload instantly on the front end
+            if (token) await fetchData(token);
+
+        } catch (err: any) {
+            alert(err.response?.data?.error || "An error occurred during synchronization.");
+        } finally {
+            setSyncing(false);
         }
     };
 
@@ -544,8 +584,19 @@ export default function CourseDetailsPage() {
                                             onClick={() => setShowImportModal(true)}
                                             className="bg-white text-[#4FB6DF] px-6 py-1.5 text-sm font-bold transform -translate-y-1 hover:bg-blue-50 transition-colors shadow-sm"
                                         >
-                                            Import
+                                            {course?.courseSheetUrl ? "Update Link" : "Import Sheets"}
                                         </button>
+                                        {course?.courseSheetUrl && (
+                                            <button
+                                                onClick={handleSync}
+                                                disabled={syncing}
+                                                className={`px-6 py-1.5 text-sm font-bold transform -translate-y-1 transition-colors shadow-sm ${
+                                                    syncing ? 'bg-gray-300 text-gray-500 cursor-not-allowed' : 'bg-[#4FB6DF] text-white border border-white hover:bg-blue-500'
+                                                }`}
+                                            >
+                                                {syncing ? "Syncing..." : "Force Sync"}
+                                            </button>
+                                        )}
                                     </>
                                 )}
                                 {activeTab === 'consultations' && canManageGroupings && (
