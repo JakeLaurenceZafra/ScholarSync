@@ -46,6 +46,7 @@ export default function GroupPage() {
     const [journalAttendance, setJournalAttendance] = useState<Record<string, string>>({});
     const [journalParticipation, setJournalParticipation] = useState<Record<string, string>>({});
     const [fetchingJournalDetails, setFetchingJournalDetails] = useState(false);
+    const [exportingDocs, setExportingDocs] = useState(false);
 
     // Task Creation Modal State
     const [showTaskModal, setShowTaskModal] = useState(false);
@@ -123,6 +124,27 @@ export default function GroupPage() {
 
         fetchDetails();
     }, [selectedJournal]);
+
+    const handleExportDocs = async () => {
+        if (!selectedJournal) return;
+        
+        try {
+            setExportingDocs(true);
+            const token = localStorage.getItem('auth_token');
+            const res = await axios.post(`http://localhost:5000/api/consultations/${selectedJournal.conID}/export-docs`, {}, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+
+            if (res.data.url) {
+                window.open(res.data.url, '_blank');
+            }
+        } catch (err: any) {
+            console.error("Export error:", err);
+            alert(err.response?.data?.error || "Failed to export to Google Docs. Make sure the advisor has linked their Google account.");
+        } finally {
+            setExportingDocs(false);
+        }
+    };
 
     const handleCreateTask = async () => {
         if (!taskTitle || !taskAssign || !taskDeadline) {
@@ -409,7 +431,25 @@ export default function GroupPage() {
                         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm fixed p-4">
                             <div className="bg-white w-full max-w-3xl rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
                                 <div className="bg-[#0095FF] px-6 py-4 flex justify-between items-center shrink-0">
-                                    <h2 className="text-lg font-bold text-white">Journal Details</h2>
+                                    <div className="flex items-center gap-4">
+                                        <h2 className="text-lg font-bold text-white">Journal Details</h2>
+                                        {(user?.role === 'Admin' || user?.role === 'Advisers') && (
+                                            <button 
+                                                onClick={handleExportDocs}
+                                                disabled={exportingDocs}
+                                                className="bg-white/20 hover:bg-white/30 disabled:opacity-50 text-white text-[10px] font-black uppercase tracking-widest px-4 py-1.5 rounded-full transition-all flex items-center gap-2 border border-white/20 shadow-sm"
+                                            >
+                                                {exportingDocs ? (
+                                                    <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                                ) : (
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                    </svg>
+                                                )}
+                                                {exportingDocs ? 'Generating...' : 'Get DOCs Copy'}
+                                            </button>
+                                        )}
+                                    </div>
                                     <button onClick={() => setSelectedJournal(null)} className="text-white/80 hover:text-white transition-colors text-xl leading-none">&times;</button>
                                 </div>
                                 <div className="p-8 overflow-y-auto flex flex-col gap-8 custom-scrollbar">

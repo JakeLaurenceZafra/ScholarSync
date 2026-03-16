@@ -723,6 +723,73 @@ app.put('/api/consultations/:id/participation', verifyInstructor, async (req, re
   }
 });
 
+// STANDALONE DOC EXPORT
+app.post('/api/consultations/:id/export-docs', verifyInstructor, async (req: any, res: any) => {
+  const conID = req.params.id;
+  const userPayload = req.user; // Set by verifyInstructor
+
+  try {
+    // 1. Get Consultation details
+    const { data: consultation, error: conError } = await supabase
+      .from('ss_consultation')
+      .select('*')
+      .eq('conID', conID)
+      .single();
+
+    if (conError || !consultation) return res.status(404).json({ error: "Consultation not found" });
+
+    // Use the email of the person who clicked the button (Admin or Adviser)
+    const exportUserEmail = userPayload.email;
+
+    // 3. Fetch Attendance
+    const { data: attRecord } = await supabase.from('ss_attendance').select('*').eq('conID', conID).single();
+    const attendanceMap: Record<string, string> = {};
+    if (attRecord) {
+        const idList = [attRecord.oneID, attRecord.twoID, attRecord.threeID, attRecord.fourID, attRecord.fiveID].filter(Boolean);
+        const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
+        const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+        
+        const extractAtt = (idVal: number | null, statusVal: string | null) => {
+            if (idVal && accountMap.has(idVal)) {
+                attendanceMap[accountMap.get(idVal)!] = statusVal || 'Present';
+            }
+        };
+        extractAtt(attRecord.oneID, attRecord.mem1);
+        extractAtt(attRecord.twoID, attRecord.mem2);
+        extractAtt(attRecord.threeID, attRecord.mem3);
+        extractAtt(attRecord.fourID, attRecord.mem4);
+        extractAtt(attRecord.fiveID, attRecord.mem5);
+    }
+
+    // 4. Fetch Participation
+    const { data: partRecord } = await supabase.from('ss_participation').select('*').eq('conID', conID).single();
+    const participationMap: Record<string, string> = {};
+    if (partRecord) {
+        const idList = [partRecord.mem1, partRecord.mem2, partRecord.mem3, partRecord.mem4, partRecord.mem5].filter(Boolean);
+        const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
+        const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
+        
+        const extractPart = (idVal: number | null, ratingVal: string | null) => {
+            if (idVal && accountMap.has(idVal)) {
+                participationMap[accountMap.get(idVal)!] = ratingVal || 'Moderate';
+            }
+        };
+        extractPart(partRecord.mem1, partRecord.part1);
+        extractPart(partRecord.mem2, partRecord.part2);
+        extractPart(partRecord.mem3, partRecord.part3);
+        extractPart(partRecord.mem4, partRecord.part4);
+        extractPart(partRecord.mem5, partRecord.part5);
+    }
+
+    const docUrl = await GoogleDocsService.exportStandaloneJournal(consultation, exportUserEmail, attendanceMap, participationMap);
+    res.json({ url: docUrl });
+
+  } catch (err: any) {
+    console.error("Export Docs Error:", err);
+    res.status(500).json({ error: err.message });
+  }
+});
+
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 
