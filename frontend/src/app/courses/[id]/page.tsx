@@ -44,6 +44,7 @@ type Consultation = {
     conAtt: string;
     isDraft: boolean;
     conStat: string;
+    conNotes?: string;
 };
 
 type Task = {
@@ -88,8 +89,10 @@ export default function CourseDetailsPage() {
     const [conMil, setConMil] = useState('');
     const [conSum, setConSum] = useState('');
     const [conStat, setConStat] = useState('On Track'); // Default
+    const [conNotes, setConNotes] = useState('');
     const [selectedGroup, setSelectedGroup] = useState('');
     const [creatingConsultation, setCreatingConsultation] = useState(false);
+    const [showArchive, setShowArchive] = useState(false); // Archive state
 
     // Create Group Modal State
     const [showCreateGroupModal, setShowCreateGroupModal] = useState(false);
@@ -101,6 +104,8 @@ export default function CourseDetailsPage() {
     const [expandedConsId, setExpandedConsId] = useState<number | null>(null);
     const [attendanceState, setAttendanceState] = useState<Record<number, Record<string, 'Present' | 'Absent'>>>({});
     const [participationState, setParticipationState] = useState<Record<number, Record<string, 'High' | 'Moderate' | 'Low'>>>({});
+    const [statusState, setStatusState] = useState<Record<number, string>>({});
+    const [notesState, setNotesState] = useState<Record<number, string>>({});
     const [fetchedConsTasks, setFetchedConsTasks] = useState<Record<number, Task[]>>({});
 
     // Task Info Modal State
@@ -156,6 +161,13 @@ export default function CourseDetailsPage() {
                     ...prev,
                     [consId]: initialParticipation
                 }));
+                
+                // Initialize local status and notes from the consultation record
+                const consRecord = consultations.find(c => c.conID === consId);
+                if (consRecord) {
+                    setStatusState(prev => ({ ...prev, [consId]: consRecord.conStat }));
+                    setNotesState(prev => ({ ...prev, [consId]: consRecord.conNotes || '' }));
+                }
             }
 
             // 2. Fetch Tasks dynamically based on the stored GroupName
@@ -181,7 +193,12 @@ export default function CourseDetailsPage() {
 
         const currentAtt = attendanceState[consId];
         const currentPart = participationState[consId];
+        const currentStatus = statusState[consId];
+        const currentNotes = notesState[consId];
         if (!currentAtt || !currentPart) return;
+
+        const consRecord = consultations.find(c => c.conID === consId);
+        if (!consRecord) return;
 
         try {
             await Promise.all([
@@ -192,8 +209,26 @@ export default function CourseDetailsPage() {
                 axios.put(`http://localhost:5000/api/consultations/${consId}/participation`, 
                     { groupName, participation: currentPart },
                     { headers: { Authorization: `Bearer ${token}` } }
+                ),
+                axios.put(`http://localhost:5000/api/consultations/${consId}`,
+                    {
+                        ...consRecord,
+                        conStat: currentStatus || consRecord.conStat,
+                        conNotes: currentNotes || consRecord.conNotes,
+                        isDraft: false
+                    },
+                    { headers: { Authorization: `Bearer ${token}` } }
                 )
             ]);
+            
+            // Update local consultations list so the UI reflects the saved changes
+            setConsultations(prev => prev.map(c => c.conID === consId ? { 
+                ...c, 
+                conStat: currentStatus || c.conStat, 
+                conNotes: currentNotes || c.conNotes,
+                isDraft: false
+            } : c));
+
             alert("Records saved successfully!");
         } catch (err: any) {
             alert(err.response?.data?.error || "Failed to save records.");
@@ -376,9 +411,10 @@ export default function CourseDetailsPage() {
                     conType,
                     conMil,
                     conSum,
-                    conStat,
+                    conStat: 'On Track', // Default for new
+                    conNotes,
                     groupName: selectedGroup,
-                    isDraft
+                    isDraft: true // Default to Draft as requested
                 },
                 { headers: { Authorization: `Bearer ${token}` } }
             );
@@ -408,6 +444,7 @@ export default function CourseDetailsPage() {
         setConMil(cons.conMil);
         setConSum(cons.conSum);
         setConStat(cons.conStat);
+        setConNotes(cons.conNotes || '');
         setSelectedGroup(cons.groupName);
         setShowConsultationModal(true);
     };
@@ -431,8 +468,9 @@ export default function CourseDetailsPage() {
                     conSum,
                     conAction: consultations.find(c => c.conID === isEditingConsId)?.conAction || '', 
                     conStat,
+                    conNotes,
                     groupName: selectedGroup,
-                    isDraft
+                    isDraft: true // Default to Draft as requested
                 },
                 { headers: { Authorization: `Bearer ${token}` } }
             );
@@ -600,12 +638,22 @@ export default function CourseDetailsPage() {
                                     </>
                                 )}
                                 {activeTab === 'consultations' && canManageGroupings && (
-                                    <button
-                                        onClick={() => setShowConsultationModal(true)}
-                                        className="bg-white text-[#4FB6DF] px-6 py-1.5 text-sm font-bold transform -translate-y-1 hover:bg-blue-50 transition-colors shadow-sm"
-                                    >
-                                        Create
-                                    </button>
+                                    <div className="flex items-center gap-2">
+                                        <button
+                                            onClick={() => setShowArchive(!showArchive)}
+                                            className={`px-6 py-1.5 text-sm font-bold transform -translate-y-1 transition-colors shadow-sm ${
+                                                showArchive ? 'bg-indigo-600 text-white border border-white hover:bg-indigo-700' : 'bg-white text-[#4FB6DF] hover:bg-blue-50'
+                                            }`}
+                                        >
+                                            {showArchive ? "View Active" : "View Archive"}
+                                        </button>
+                                        <button
+                                            onClick={() => setShowConsultationModal(true)}
+                                            className="bg-white text-[#4FB6DF] px-6 py-1.5 text-sm font-bold transform -translate-y-1 hover:bg-blue-50 transition-colors shadow-sm"
+                                        >
+                                            Create
+                                        </button>
+                                    </div>
                                 )}
                             </div>
                         </div>
@@ -676,9 +724,9 @@ export default function CourseDetailsPage() {
 
                             {/* --------- GROUPINGS TAB --------- */}
                             {activeTab === 'groupings' && (
-                                groupings.length > 0 ? groupings.map((group) => (
+                                groupings.length > 0 ? groupings.map((group, index) => (
                                     <div 
-                                      key={group.groupID} 
+                                      key={group.groupID || `group-${index}`} 
                                       onClick={() => router.push(`/courses/${params.id}/groups/${group.groupID}`)}
                                       className="bg-white w-full py-4 px-6 flex items-center justify-between text-black shadow-sm relative group/item cursor-pointer hover:bg-blue-50 transition-colors"
                                     >
@@ -701,8 +749,8 @@ export default function CourseDetailsPage() {
 
                             {/* --------- CONSULTATIONS TAB --------- */}
                             {activeTab === 'consultations' && (
-                                consultations.length > 0 ? consultations.map((cons) => (
-                                    <div key={cons.conID} className={`bg-white w-full shadow-sm border-l-4 ${cons.isDraft ? 'border-gray-400' : 'border-[#4FB6DF]'} mb-3`}>
+                                consultations.length > 0 ? consultations.filter(c => c.isDraft === !showArchive).map((cons, index) => (
+                                    <div key={cons.conID || `cons-${index}`} className={`bg-white w-full shadow-sm border-l-4 ${cons.isDraft ? 'border-gray-400' : 'border-[#4FB6DF]'} mb-3`}>
                                         <div
                                             className="py-4 px-6 flex items-center justify-between text-black relative group/item cursor-pointer hover:bg-gray-50 transition-colors"
                                             onClick={() => toggleConsExpand(cons.conID, cons.conAtt, cons.groupName)}
@@ -718,18 +766,11 @@ export default function CourseDetailsPage() {
                                                 </div>
                                                 <div className="text-sm font-medium text-gray-500 mt-1 flex items-center gap-2">
                                                     <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2-2v12a2 2 0 002 2z" />
                                                     </svg>
                                                     {cons.conDate}
                                                     <span className="ml-2 px-2 py-0.5 bg-blue-50 text-blue-700 text-xs rounded-full">
                                                         {cons.conType}
-                                                    </span>
-                                                    <span className={`ml-2 px-2 py-0.5 text-xs rounded-full ${
-                                                        cons.conStat === 'On Track' ? 'bg-green-50 text-green-700' :
-                                                        cons.conStat === 'Needs Revision' ? 'bg-yellow-50 text-yellow-700' :
-                                                        'bg-red-50 text-red-700'
-                                                    }`}>
-                                                        {cons.conStat}
                                                     </span>
                                                 </div>
                                                 {!expandedConsId || expandedConsId !== cons.conID ? (
@@ -743,7 +784,7 @@ export default function CourseDetailsPage() {
 
                                             {/* Expand & Edit Icons */}
                                             <div className="flex items-center gap-4 text-[#4FB6DF]">
-                                                {(user?.role === 'Advisers' || user?.role === 'Admin') && (
+                                                {(user?.role === 'Advisers' || user?.role === 'Admin') && cons.isDraft && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -766,12 +807,47 @@ export default function CourseDetailsPage() {
                                         {/* Expanded Content */}
                                         {expandedConsId === cons.conID && (
                                             <div className="border-t border-gray-100 px-6 py-4 bg-gray-50/50">
-                                                {/* Summary Section */}
-                                                <div className="mb-4">
-                                                    <h4 className="text-sm font-bold text-gray-700 mb-1">Discussion Summary</h4>
-                                                    <p className="text-sm text-gray-600 bg-white p-3 rounded-md border border-gray-100 shadow-sm whitespace-pre-wrap">
-                                                        {cons.conSum || <span className="italic text-gray-400">No summary provided.</span>}
-                                                    </p>
+                                                <div className="mb-4 flex flex-col items-start gap-4">
+                                                    <div className="w-full">
+                                                        <h4 className="text-sm font-bold text-gray-700 mb-1">Milestone Description</h4>
+                                                        <p className="text-sm text-gray-600 bg-white p-3 rounded-md border border-gray-100 shadow-sm whitespace-pre-wrap">
+                                                            {cons.conSum || <span className="italic text-gray-400">No description provided.</span>}
+                                                        </p>
+                                                    </div>
+
+                                                    <div className="flex gap-6 w-full">
+                                                        <div className="flex-1">
+                                                            <h4 className="text-sm font-bold text-gray-700 mb-1">Status Indicator</h4>
+                                                            {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
+                                                                <select 
+                                                                    value={statusState[cons.conID] || cons.conStat}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    disabled={!cons.isDraft}
+                                                                    onChange={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setStatusState(prev => ({ ...prev, [cons.conID]: e.target.value }));
+                                                                    }}
+                                                                    className={`w-full text-sm font-bold rounded-md px-3 py-2 outline-none border transition-colors ${
+                                                                        (statusState[cons.conID] || cons.conStat) === 'On Track' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                                        (statusState[cons.conID] || cons.conStat) === 'Needs Revision' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                                                                        'bg-red-50 text-red-700 border-red-200'
+                                                                    }`}
+                                                                >
+                                                                    <option value="On Track">On Track</option>
+                                                                    <option value="Needs Revision">Needs Revision</option>
+                                                                    <option value="At Risk">At Risk</option>
+                                                                </select>
+                                                            ) : (
+                                                                <span className={`inline-flex px-3 py-1 text-sm font-bold rounded-full ${
+                                                                    cons.conStat === 'On Track' ? 'bg-green-50 text-green-700' :
+                                                                    cons.conStat === 'Needs Revision' ? 'bg-yellow-50 text-yellow-700' :
+                                                                    'bg-red-50 text-red-700'
+                                                                }`}>
+                                                                    {cons.conStat}
+                                                                </span>
+                                                            )}
+                                                        </div>
+                                                    </div>
                                                 </div>
 
                                                 {/* Action Items Section */}
@@ -840,6 +916,7 @@ export default function CourseDetailsPage() {
                                                                                     <select
                                                                                         value={partStatus}
                                                                                         onClick={(e) => e.stopPropagation()}
+                                                                                        disabled={!cons.isDraft}
                                                                                         onChange={(e) => {
                                                                                             e.stopPropagation();
                                                                                             updateParticipation(cons.conID, attendee, e.target.value as any);
@@ -868,7 +945,8 @@ export default function CourseDetailsPage() {
                                                                             {/* Attendance Toggle */}
                                                                             {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
                                                                                 <button
-                                                                                    onClick={(e) => { e.stopPropagation(); toggleAttendance(cons.conID, attendee); }}
+                                                                                    onClick={(e) => { e.stopPropagation(); if (cons.isDraft) toggleAttendance(cons.conID, attendee); }}
+                                                                                    disabled={!cons.isDraft}
                                                                                     className={`px-3 py-1 w-20 text-xs font-bold rounded-full transition-colors ${status === 'Present'
                                                                                             ? 'bg-green-100 text-green-700 hover:bg-green-200'
                                                                                             : 'bg-red-100 text-red-700 hover:bg-red-200'
@@ -890,7 +968,28 @@ export default function CourseDetailsPage() {
                                                                 );
                                                             })}
                                                         </div>
-                                                        {(user?.role === 'Advisers' || user?.role === 'Admin') && (
+                                                        <div className="mt-6 border-t border-gray-100 pt-4">
+                                                            <h4 className="text-sm font-bold text-gray-700 mb-2">Internal Notes (Adviser Only)</h4>
+                                                            {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
+                                                                <textarea
+                                                                    value={notesState[cons.conID] || ''}
+                                                                    onClick={(e) => e.stopPropagation()}
+                                                                    disabled={!cons.isDraft}
+                                                                    onChange={(e) => {
+                                                                        e.stopPropagation();
+                                                                        setNotesState(prev => ({ ...prev, [cons.conID]: e.target.value }));
+                                                                    }}
+                                                                    placeholder="Add feedback or private notes here..."
+                                                                    className="w-full text-sm text-gray-700 bg-white p-3 rounded-md border border-gray-200 shadow-sm focus:ring-1 focus:ring-[#4FB6DF] focus:outline-none resize-none min-h-[80px]"
+                                                                />
+                                                            ) : (
+                                                                <div className="text-sm text-gray-600 bg-gray-100/50 p-3 rounded-md border border-gray-100 min-h-[80px]">
+                                                                    {cons.conNotes || <span className="italic text-gray-400">No notes provided for this consultation.</span>}
+                                                                </div>
+                                                            )}
+                                                        </div>
+
+                                                        {(user?.role === 'Advisers' || user?.role === 'Admin') && cons.isDraft && (
                                                             <div className="mt-4 flex justify-end">
                                                                 <button
                                                                     onClick={(e) => {
@@ -899,7 +998,7 @@ export default function CourseDetailsPage() {
                                                                     }}
                                                                     className="bg-[#4FB6DF] hover:bg-blue-500 text-white text-sm font-bold py-2 px-6 rounded-md shadow-sm transition-colors"
                                                                 >
-                                                                    Save Records
+                                                                    Published
                                                                 </button>
                                                             </div>
                                                         )}
@@ -1080,25 +1179,14 @@ export default function CourseDetailsPage() {
                                             <option value="Face-to-Face">Face-to-Face</option>
                                         </select>
 
-                                        <label className="text-white text-sm font-semibold mb-2 self-start pl-1">Discussion Summary</label>
+                                        <label className="text-white text-sm font-semibold mb-2 self-start pl-1">Milestone Description</label>
                                         <textarea
                                             value={conSum}
                                             onChange={(e) => setConSum(e.target.value)}
-                                            placeholder="Notes on what was discussed..."
+                                            placeholder="Provide a detailed description of this milestone..."
                                             rows={3}
                                             className="w-full bg-white text-black text-sm px-3 py-2 rounded-none focus:outline-none focus:ring-2 focus:ring-white mb-4 resize-none"
                                         />
-
-                                        <label className="text-white text-sm font-semibold mb-2 self-start pl-1">Status Indicator</label>
-                                        <select
-                                            value={conStat}
-                                            onChange={(e) => setConStat(e.target.value)}
-                                            className="w-full bg-white text-black text-sm px-3 py-2 rounded-none focus:outline-none focus:ring-2 focus:ring-white mb-4"
-                                        >
-                                            <option value="On Track">On Track</option>
-                                            <option value="Needs Revision">Needs Revision</option>
-                                            <option value="At Risk">At Risk</option>
-                                        </select>
 
                                         <label className="text-white text-sm font-semibold mb-2 self-start pl-1">Assign Attendees (Group)</label>
                                         <select
@@ -1115,16 +1203,6 @@ export default function CourseDetailsPage() {
                                         </select>
 
                                         <div className="flex gap-4 w-full mb-4">
-                                            {(!isEditingConsId || consultations.find(c => c.conID === isEditingConsId)?.isDraft) && (
-                                                <button
-                                                    onClick={() => isEditingConsId ? handleUpdateConsultation(true) : handleCreateConsultation(true)}
-                                                    disabled={creatingConsultation}
-                                                    className="flex-1 bg-gray-200 text-gray-700 font-bold text-sm px-4 py-2 rounded-sm hover:bg-gray-300 transition-colors disabled:opacity-50 disabled:cursor-not-allowed uppercase tracking-wider shadow-sm flex items-center justify-center gap-2"
-                                                >
-                                                    Save as Draft
-                                                </button>
-                                            )}
-
                                             <button
                                                 onClick={() => isEditingConsId ? handleUpdateConsultation(false) : handleCreateConsultation(false)}
                                                 disabled={creatingConsultation}
@@ -1136,9 +1214,9 @@ export default function CourseDetailsPage() {
                                                             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
                                                             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
                                                         </svg>
-                                                        {isEditingConsId ? 'Updating...' : 'Publishing...'}
+                                                        {isEditingConsId ? 'Updating...' : 'Confirming...'}
                                                     </>
-                                                ) : (isEditingConsId ? 'Update' : 'Publish')}
+                                                ) : 'Confirm'}
                                             </button>
                                         </div>
                                     </div>

@@ -42,6 +42,11 @@ export default function GroupPage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
 
+    // Journal Details Loading State
+    const [journalAttendance, setJournalAttendance] = useState<Record<string, string>>({});
+    const [journalParticipation, setJournalParticipation] = useState<Record<string, string>>({});
+    const [fetchingJournalDetails, setFetchingJournalDetails] = useState(false);
+
     // Task Creation Modal State
     const [showTaskModal, setShowTaskModal] = useState(false);
     const [taskTitle, setTaskTitle] = useState('');
@@ -52,6 +57,7 @@ export default function GroupPage() {
 
     const fetchGroupData = async (token: string) => {
         try {
+            console.log("DEBUG: fetchGroupData for groupId:", groupId);
             const groupRes = await axios.get(`http://localhost:5000/api/groups/${groupId}`, { headers: { Authorization: `Bearer ${token}` } });
             setGroup(groupRes.data);
 
@@ -87,6 +93,36 @@ export default function GroupPage() {
 
         fetchGroupData(token);
     }, [groupId, router]);
+
+    useEffect(() => {
+        const fetchDetails = async () => {
+            if (!selectedJournal) {
+                setJournalAttendance({});
+                setJournalParticipation({});
+                return;
+            }
+
+            try {
+                setFetchingJournalDetails(true);
+                const token = localStorage.getItem('auth_token');
+                if (!token) return;
+
+                const [attRes, partRes] = await Promise.all([
+                    axios.get(`http://localhost:5000/api/consultations/${selectedJournal.conID}/attendance`, { headers: { Authorization: `Bearer ${token}` } }),
+                    axios.get(`http://localhost:5000/api/consultations/${selectedJournal.conID}/participation`, { headers: { Authorization: `Bearer ${token}` } })
+                ]);
+
+                setJournalAttendance(attRes.data || {});
+                setJournalParticipation(partRes.data || {});
+            } catch (err) {
+                console.error("Error fetching journal details:", err);
+            } finally {
+                setFetchingJournalDetails(false);
+            }
+        };
+
+        fetchDetails();
+    }, [selectedJournal]);
 
     const handleCreateTask = async () => {
         if (!taskTitle || !taskAssign || !taskDeadline) {
@@ -273,8 +309,8 @@ export default function GroupPage() {
                                                         </div>
                                                     </div>
                                                     
-                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Discussion Summary</h4>
-                                                    <p className="text-sm text-gray-700 whitespace-pre-wrap">{journal.conSum || <span className="italic text-gray-400 text-xs">No summary logged.</span>}</p>
+                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Milestone Description</h4>
+                                                    <p className="text-sm text-gray-700 whitespace-pre-wrap">{journal.conSum || <span className="italic text-gray-400 text-xs">No description logged.</span>}</p>
                                                 </div>
                                             ))}
                                         </div>
@@ -371,64 +407,127 @@ export default function GroupPage() {
                     {/* Journal Details Modal */}
                     {selectedJournal && (
                         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm fixed p-4">
-                            <div className="bg-white w-full max-w-2xl rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+                            <div className="bg-white w-full max-w-3xl rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
                                 <div className="bg-[#0095FF] px-6 py-4 flex justify-between items-center shrink-0">
                                     <h2 className="text-lg font-bold text-white">Journal Details</h2>
                                     <button onClick={() => setSelectedJournal(null)} className="text-white/80 hover:text-white transition-colors text-xl leading-none">&times;</button>
                                 </div>
-                                <div className="p-6 overflow-y-auto flex flex-col gap-6 custom-scrollbar">
-                                    <div className="flex justify-between items-start border-b border-gray-200 pb-4">
-                                        <div>
-                                            <h3 className="text-2xl font-bold text-gray-900">{selectedJournal.conMil}</h3>
-                                            <div className="flex gap-2 mt-2">
-                                                <span className="text-xs font-bold text-[#0095FF] bg-blue-50 px-3 py-1 rounded-full">{selectedJournal.conStat}</span>
-                                                <span className="text-xs font-bold text-gray-600 bg-gray-100 px-3 py-1 rounded-full">{selectedJournal.conType}</span>
-                                            </div>
-                                        </div>
-                                        <div className="text-right">
-                                            <span className="text-sm font-semibold text-gray-500 flex items-center gap-1 justify-end">
-                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                                </svg>
-                                                {selectedJournal.conDate}
-                                            </span>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Discussion Summary</h4>
-                                        <p className="text-sm text-gray-700 whitespace-pre-wrap bg-gray-50 p-4 rounded-lg border border-gray-100">
-                                            {selectedJournal.conSum || <span className="italic text-gray-400">No summary.</span>}
-                                        </p>
-                                    </div>
-
-                                    {selectedJournal.conAction && (
-                                        <div>
-                                            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Assigned Action Items</h4>
-                                            <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans bg-gray-50 p-4 rounded-lg border border-gray-100">
-                                                {selectedJournal.conAction}
-                                            </pre>
-                                        </div>
-                                    )}
-
-                                    {selectedJournal.conAtt && (
-                                        <div>
-                                            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attendees</h4>
+                                <div className="p-8 overflow-y-auto flex flex-col gap-8 custom-scrollbar">
+                                    {/* Top Section: Header Info */}
+                                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-gray-100 pb-6">
+                                        <div className="flex-1">
+                                            <h3 className="text-3xl font-black text-gray-900 leading-tight mb-2 uppercase tracking-tight">{selectedJournal.conMil}</h3>
                                             <div className="flex flex-wrap gap-2">
-                                                {selectedJournal.conAtt.split(',').map((a: string) => a.trim()).filter(Boolean).map((att: string, i: number) => (
-                                                    <span key={i} className="px-3 py-1 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-700 shadow-sm flex items-center gap-2">
-                                                        <div className="w-5 h-5 rounded-full bg-gray-200 flex-shrink-0"></div>
-                                                        {att}
-                                                    </span>
-                                                ))}
+                                                <span className={`text-[10px] uppercase font-black px-3 py-1 rounded-full border shadow-sm ${
+                                                    selectedJournal.conStat === 'On Track' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                    selectedJournal.conStat === 'Needs Revision' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                                                    'bg-red-50 text-red-700 border-red-200'
+                                                }`}>
+                                                    {selectedJournal.conStat}
+                                                </span>
+                                                <span className="text-[10px] uppercase font-black px-3 py-1 bg-blue-50 text-blue-700 border border-blue-100 rounded-full shadow-sm">
+                                                    {selectedJournal.conType}
+                                                </span>
                                             </div>
                                         </div>
-                                    )}
+                                        <div className="flex items-center gap-2 text-gray-400 font-bold bg-gray-50 px-4 py-2 rounded-lg border border-gray-100 shadow-inner">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                            </svg>
+                                            <span className="text-sm tracking-widest">{selectedJournal.conDate}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Middle Section: Description */}
+                                    <div className="space-y-3">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Milestone Description</h4>
+                                        <div className="bg-slate-50/50 p-6 rounded-2xl border border-slate-100 shadow-sm">
+                                            <p className="text-gray-700 leading-relaxed text-sm whitespace-pre-wrap">
+                                                {selectedJournal.conSum || <span className="italic text-gray-400">No description provided.</span>}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Attendees Table */}
+                                    <div className="space-y-3">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Attendance & Participation</h4>
+                                        <div className="overflow-hidden border border-gray-100 rounded-xl shadow-sm">
+                                            <table className="w-full text-left border-collapse">
+                                                <thead className="bg-[#4FB6DF]/10 border-b border-gray-100">
+                                                    <tr>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider">Member Name</th>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider text-right">Attendance</th>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider text-right">Participation Rating</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-gray-50">
+                                                    {fetchingJournalDetails ? (
+                                                        <tr>
+                                                            <td colSpan={3} className="px-6 py-8 text-center text-gray-400 italic text-sm">
+                                                                <div className="flex items-center justify-center gap-2">
+                                                                    <div className="w-4 h-4 border-2 border-[#4FB6DF] border-t-transparent rounded-full animate-spin"></div>
+                                                                    Loading records...
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    ) : selectedJournal.conAtt ? (
+                                                        selectedJournal.conAtt.split(',').map((name: string) => name.trim()).filter(Boolean).map((attendee: string, i: number) => {
+                                                            const status = journalAttendance[attendee] || 'Absent';
+                                                            const rating = journalParticipation[attendee] || 'None';
+                                                            return (
+                                                                <tr key={i} className="hover:bg-gray-50/50 transition-colors">
+                                                                    <td className="px-6 py-4">
+                                                                        <div className="flex items-center gap-3">
+                                                                            <div className="w-8 h-8 rounded-full bg-[#0095FF]/10 flex items-center justify-center text-[#0095FF] font-black text-xs border border-[#0095FF]/20 shadow-sm">
+                                                                                {attendee.charAt(0)}
+                                                                            </div>
+                                                                            <span className="text-sm font-bold text-gray-800">{attendee}</span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-6 py-4 text-right">
+                                                                        <span className={`text-[10px] font-black px-3 py-1 rounded-full shadow-sm border ${
+                                                                            status === 'Present' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'
+                                                                        }`}>
+                                                                            {status}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-6 py-4 text-right">
+                                                                        <span className={`text-[10px] font-black px-3 py-1 rounded-full shadow-sm border ${
+                                                                            rating === 'High' ? 'bg-blue-100 text-blue-700 border-blue-200' :
+                                                                            rating === 'Moderate' ? 'bg-amber-100 text-amber-700 border-amber-200' :
+                                                                            rating === 'Low' ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                                                                            'bg-slate-50 text-slate-400 border-slate-100 italic'
+                                                                        }`}>
+                                                                            {rating}
+                                                                        </span>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })
+                                                    ) : (
+                                                        <tr>
+                                                            <td colSpan={3} className="px-6 py-8 text-center text-gray-400 italic text-sm">No attendees logged.</td>
+                                                        </tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* Bottom Section: Internal Notes */}
+                                    <div className="space-y-3 pt-4 border-t border-gray-100">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Adviser&apos;s Notes</h4>
+                                        <div className="bg-[#4FB6DF]/5 p-6 rounded-2xl border border-[#4FB6DF]/10 shadow-sm relative overflow-hidden group">
+                                            <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#4FB6DF] opacity-50 group-hover:opacity-100 transition-opacity"></div>
+                                            <p className="text-gray-700 italic text-sm leading-relaxed pl-2 whitespace-pre-wrap">
+                                                {selectedJournal.conNotes || "No internal notes provided for this consultation."}
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     )}
-
                 </main>
             </div>
         </SidebarLayout>

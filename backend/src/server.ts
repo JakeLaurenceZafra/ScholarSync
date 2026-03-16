@@ -6,6 +6,7 @@ import { createClient } from '@supabase/supabase-js';
 import cors from 'cors';
 import 'dotenv/config';
 import { GoogleDocsService } from './googleDocsService.js';
+import fs from 'fs';
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_ANON_KEY!;
@@ -403,9 +404,9 @@ app.get('/api/courses/:id/consultations', async (req, res) => {
 
 app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express.Request, res: express.Response) => {
   const courseId = req.params.id;
-  const { conDate, conType, conMil, conSum, isDraft, conStat, groupName } = req.body;
+  const { conDate, conType, conMil, conSum, isDraft, conStat, groupName, conNotes } = req.body;
 
-  if (!conDate || !conType || !conMil || !conStat || !groupName) {
+  if (!conDate || !conType || !conMil || !groupName) {
     return res.status(400).json({ error: "Missing required consultation details" });
   }
 
@@ -424,9 +425,10 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express
     }
 
     // Fetch tasks for the group to auto-populate conAction
-    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', groupName).single();
+    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', groupName);
+    const group = groups?.[0];
     if (group) {
-        const { data: tasks } = await supabase.from('ss_grouptasks').select('taskTitle').eq('groupID', group.smallgroupID);
+        const { data: tasks } = await supabase.from('ss_grouptasks').select('taskTitle').eq('groupId', group.smallgroupID);
         if (tasks && tasks.length > 0) {
             actionsStr = tasks.map(t => `- ${t.taskTitle}`).join('\n');
         }
@@ -445,7 +447,8 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express
       conAction: actionsStr,
       conAtt: attendeesStr,
       isDraft: isDraft || false,
-      conStat
+      conStat: conStat || 'On Track',
+      conNotes: conNotes || ''
     }])
     .select()
     .single();
@@ -467,7 +470,7 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express
 
 app.put('/api/consultations/:id', verifyInstructor, async (req: express.Request, res: express.Response) => {
   const conID = req.params.id;
-  const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName } = req.body;
+  const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName, conNotes } = req.body;
 
   const { data, error } = await supabase
     .from('ss_consultation')
@@ -479,7 +482,8 @@ app.put('/api/consultations/:id', verifyInstructor, async (req: express.Request,
       conAction,
       isDraft,
       conStat,
-      groupName
+      groupName,
+      conNotes
     })
     .eq('conID', conID)
     .select()
@@ -732,6 +736,7 @@ async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, sav
   const csvUrl = `https://docs.google.com/spreadsheets/d/${sheetId}/export?format=csv`;
   const response = await axios.get(csvUrl);
   const csvData = response.data;
+  console.log(`[SYNC] Fetched CSV from Google Sheets. Length: ${csvData?.length || 0}`);
 
   const records = parse(csvData, {
     columns: true,
@@ -739,7 +744,7 @@ async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, sav
   });
 
   const groupsMap: { [key: string]: string[] } = {};
-  const updates = [];
+  const accountUpdates = [];
 
   for (const row of records as any[]) {
     const email = row['Email']?.trim();
@@ -753,9 +758,11 @@ async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, sav
         .from('ss_account')
         .update({ accountGroup: groupName })
         .eq('accountEmail', email);
-      updates.push(updatePromise);
+      accountUpdates.push(updatePromise);
     }
   }
+
+  console.log(`[SYNC] Parsed ${Object.keys(groupsMap).length} groups from CSV.`);
 
   // Validate max 5 members per group
   for (const [groupName, members] of Object.entries(groupsMap)) {
@@ -764,7 +771,7 @@ async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, sav
     }
   }
 
-  await Promise.all(updates);
+  await Promise.all(accountUpdates);
 
   // If saveUrl is true, update the course with the sheetUrl so we can auto-sync it later
   if (saveUrl) {
@@ -777,52 +784,128 @@ async function syncCourseGroupsFromSheet(courseId: string, sheetUrl: string, sav
     }
   }
 
-  await supabase.from('ss_groupings').delete().eq('courseID', courseId);
+  // STABLE SYNC LOGIC:
+  // 1. Fetch existing groupings for this course
+  const { data: existingGroupings, error: fetchErr } = await supabase
+    .from('ss_groupings')
+    .select('groupName, groupID')
+    .eq('courseID', courseId);
   
-  const existingGroupingsRes = await supabase.from('ss_groupings').select('groupName').eq('courseID', courseId);
-  if (existingGroupingsRes.data && existingGroupingsRes.data.length > 0) {
-     // NOTE: This logic seems flawed in original code because we just deleted everything for courseID above
-     // but we'll try to delete related ss_group rows if we can match them. Just keeping logic similar for now.
-     // In a production app, we'd probably want to make sure cascading deletes happen or use a safer transaction.
-     // We will just replace it with looking at the names we are about to insert and overwriting them or deleting old ones.
-  }
-  
-  // Actually, let's delete any group that belongs to this course's *old* groupings. 
-  // Wait, we just deleted the groupings above, so we can't look them up. This was a bug in the old code.
-  // Instead, let's just delete the groups based on the names in groupsMap since we know we are replacing them.
-  const gNames = Object.keys(groupsMap);
-  if (gNames.length > 0) {
-    await supabase.from('ss_group').delete().in('groupName', gNames);
+  if (fetchErr) throw new Error(`Failed to fetch current groupings: ${fetchErr.message}`);
+  console.log(`[SYNC] Found ${existingGroupings?.length || 0} existing groupings in DB.`);
+
+  // DEDUPLICATION: Map names to all their IDs to detect current corruption
+  const nameToIds = new Map<string, number[]>();
+  existingGroupings?.forEach(g => {
+    const ids = nameToIds.get(g.groupName) || [];
+    ids.push(g.groupID);
+    nameToIds.set(g.groupName, ids);
+  });
+
+  const idsToCleanup = [];
+  const groupNameToStableId = new Map<string, number>();
+
+  for (const [name, ids] of nameToIds.entries()) {
+    const sortedIds = ids.sort((a, b) => a - b);
+    const stableId = sortedIds[0];
+    if (stableId !== undefined) {
+      groupNameToStableId.set(name, stableId);
+    }
+    if (sortedIds.length > 1) {
+      idsToCleanup.push(...sortedIds.slice(1));
+    }
   }
 
-  const groupingsInsert = [];
-  const ssGroupInsert = [];
+  const groupingsToSync = Object.keys(groupsMap);
+  const existingGroupingNames = new Set(groupNameToStableId.keys());
+  const groupingsToDelete = Array.from(existingGroupingNames).filter(name => !groupsMap[name]);
 
-  for (const [groupName, members] of Object.entries(groupsMap)) {
-    groupingsInsert.push({
+  // 2. Perform ss_groupings Sync
+  for (const groupName of groupingsToSync) {
+    const members = groupsMap[groupName];
+    if (!members) continue;
+    
+    const payload = {
       groupName: groupName,
       groupMembers: members.length.toString(),
       courseID: courseId
-    });
+    };
 
-    ssGroupInsert.push({
+    if (groupNameToStableId.has(groupName)) {
+      // Update existing stable record
+      const stableId = groupNameToStableId.get(groupName);
+      if (stableId !== undefined) {
+        await supabase.from('ss_groupings').update(payload).eq('groupID', stableId);
+      }
+    } else {
+      // Insert new
+      await supabase.from('ss_groupings').insert([payload]);
+    }
+  }
+
+  // 3. Perform ss_group Sync
+  // Fetch existing groups by name to find their IDs
+  const { data: existingGroups } = await supabase
+    .from('ss_group')
+    .select('groupName, smallgroupID')
+    .in('groupName', groupingsToSync);
+  
+  const groupNameToDetailsId = new Map<string, number>();
+  const detailsIdsToCleanup: number[] = [];
+
+  existingGroups?.forEach(g => {
+    if (groupNameToDetailsId.has(g.groupName)) {
+      detailsIdsToCleanup.push(g.smallgroupID);
+    } else {
+      groupNameToDetailsId.set(g.groupName, g.smallgroupID);
+    }
+  });
+
+  for (const groupName of groupingsToSync) {
+    const members = groupsMap[groupName];
+    if (!members) continue;
+    const payload = {
       groupName: groupName,
       member1: members[0] || null, roleOne: members[0] ? 'leader' : null,
       member2: members[1] || null, roleTwo: members[1] ? 'member' : null,
       member3: members[2] || null, roleThree: members[2] ? 'member' : null,
       member4: members[3] || null, roleFour: members[3] ? 'member' : null,
       member5: members[4] || null, roleFive: members[4] ? 'member' : null,
-    });
+    };
+
+    if (groupNameToDetailsId.has(groupName)) {
+      const smallgroupID = groupNameToDetailsId.get(groupName);
+      await supabase.from('ss_group').update(payload).eq('smallgroupID', smallgroupID);
+    } else {
+      await supabase.from('ss_group').insert([payload]);
+    }
   }
 
-  if (groupingsInsert.length > 0) {
-    const { error: groupErr } = await supabase.from('ss_groupings').insert(groupingsInsert);
-    if (groupErr) throw new Error(`Grouping Insert Failed: ${groupErr.message}`);
+  if (detailsIdsToCleanup.length > 0) {
+    await supabase.from('ss_group').delete().in('smallgroupID', detailsIdsToCleanup);
   }
 
-  if (ssGroupInsert.length > 0) {
-    const { error: ssGroupErr } = await supabase.from('ss_group').insert(ssGroupInsert);
-    if (ssGroupErr) throw new Error(`ss_group Insert Failed: ${ssGroupErr.message}`);
+  // 4. Cleanup old records and duplicates
+  if (groupingsToDelete.length > 0) {
+    // Safety: only delete from ss_group if NO OTHER course is using this name
+    const { data: otherGroupings } = await supabase
+      .from('ss_groupings')
+      .select('groupName')
+      .in('groupName', groupingsToDelete)
+      .neq('courseID', courseId);
+    
+    const namesToKeep = new Set(otherGroupings?.map(g => g.groupName) || []);
+    const namesToRemoveFromDetails = groupingsToDelete.filter(name => !namesToKeep.has(name));
+
+    await supabase.from('ss_groupings').delete().eq('courseID', courseId).in('groupName', groupingsToDelete);
+    
+    if (namesToRemoveFromDetails.length > 0) {
+      await supabase.from('ss_group').delete().in('groupName', namesToRemoveFromDetails);
+    }
+  }
+  
+  if (idsToCleanup.length > 0) {
+    await supabase.from('ss_groupings').delete().in('groupID', idsToCleanup);
   }
 
   return Object.keys(groupsMap).length;
@@ -970,28 +1053,50 @@ app.get('/api/groups/:id', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const groupingId = req.params.id;
+    const groupingIdInput = req.params.id;
+    const groupingId = Number(groupingIdInput);
+
+    if (isNaN(groupingId)) {
+      console.warn(`[DEBUG] Invalid group ID format received: "${groupingIdInput}"`);
+      return res.status(400).json({ error: "Invalid group ID format" });
+    }
 
     // 1. Fetch the group name from ss_groupings using the ID from the URL
     const { data: grouping, error: groupingError } = await supabase
       .from('ss_groupings')
-      .select('groupName')
+      .select('groupName, courseID')
       .eq('groupID', groupingId)
       .single();
     
+    console.log(`[DEBUG] Attempting to find grouping for ID ${groupingId}. Found:`, grouping, "Error:", groupingError);
+    fs.appendFileSync('c:/Users/Baku/Desktop/ScholarSync/ScholarSync/backend/debug.log', `[${new Date().toISOString()}] REQ ID=${groupingId} FOUND_NAME="${grouping?.groupName}"\n`);
+    
     if (groupingError || !grouping) {
-      return res.status(404).json({ error: "Group reference not found" });
+      return res.status(404).json({ error: `Group reference not found for ID ${groupingId}` });
     }
 
     // 2. Fetch the actual group details from ss_group using the groupName
-    const { data, error } = await supabase
+    // NOTE: Possible collision if multiple courses share groupName
+    const { data: groups, error } = await supabase
       .from('ss_group')
       .select('*')
-      .eq('groupName', grouping.groupName)
-      .single();
+      .eq('groupName', grouping.groupName);
 
-    if (error) return res.status(404).json({ error: "Group details not found" });
-    res.json(data);
+    if (error) {
+      console.error("[DEBUG] Error fetching group details:", error);
+      return res.status(500).json({ error: `Internal Server Error: ${error.message}` });
+    }
+
+    if (!groups || groups.length === 0) {
+      console.warn(`[DEBUG] No details found for groupName "${grouping.groupName}"`);
+      return res.status(404).json({ error: `Group details not found for name "${grouping.groupName}"` });
+    }
+
+    if (groups.length > 1) {
+       console.warn(`[DEBUG] Multiple groups found for name "${grouping.groupName}". Current schema causes ambiguity.`);
+    }
+
+    res.json(groups[0]);
   } catch (err) {
     res.sendStatus(403);
   }
@@ -1004,21 +1109,34 @@ app.get('/api/groups/:id/tasks', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const groupingId = req.params.id;
+    const groupingId = Number(req.params.id);
+
+    if (isNaN(groupingId)) {
+      return res.status(400).json({ error: "Invalid group ID format" });
+    }
 
     // Find smallgroupID for task linking
     const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
     if (!grouping) return res.status(404).json({ error: "Group reference not found" });
     
-    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName);
+    const group = groups?.[0];
     if (!group) return res.status(404).json({ error: "Group details not found" });
+    
+    // Fallback log if multiple found
+    if (groups && groups.length > 1) {
+      console.warn(`[DEBUG] Multiple group details found for "${grouping.groupName}" in task GET`);
+    }
 
     const { data, error } = await supabase
       .from('ss_grouptasks')
       .select('*')
-      .eq('groupID', group.smallgroupID);
+      .eq('groupId', group.smallgroupID);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      console.error(`[DEBUG] Error fetching tasks for group ${group.smallgroupID}:`, error);
+      return res.status(500).json({ error: `Failed to fetch tasks: ${error.message}` });
+    }
     res.json(data || []);
   } catch (err) {
     res.sendStatus(403);
@@ -1034,20 +1152,23 @@ app.get('/api/groups/by-name/:name/tasks', async (req, res) => {
     jwt.verify(token, process.env.JWT_SECRET || "test");
     const groupName = req.params.name;
 
-    const { data: group } = await supabase
+    const { data: groups } = await supabase
       .from('ss_group')
       .select('smallgroupID')
-      .eq('groupName', groupName)
-      .single();
+      .eq('groupName', groupName);
       
-    if (!group) return res.status(404).json({ error: "Group details not found" });
+    const group = groups?.[0];
+    if (!group) return res.status(404).json({ error: `Group details not found for name "${groupName}"` });
 
     const { data, error } = await supabase
       .from('ss_grouptasks')
       .select('*')
-      .eq('groupID', group.smallgroupID);
+      .eq('groupId', group.smallgroupID);
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+       console.error(`[DEBUG] Error fetching tasks for group name ${groupName}:`, error);
+       return res.status(500).json({ error: `Failed to fetch tasks: ${error.message}` });
+    }
     res.json(data || []);
   } catch (err) {
     res.sendStatus(403);
@@ -1061,7 +1182,12 @@ app.post('/api/groups/:id/tasks', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || "test");
-    const groupingId = req.params.id;
+    const groupingId = Number(req.params.id);
+
+    if (isNaN(groupingId)) {
+      return res.status(400).json({ error: "Invalid group ID format" });
+    }
+
     const { taskTitle, taskAssign, taskDeadline, taskInfo } = req.body;
 
     if (!taskTitle || !taskAssign || !taskDeadline) {
@@ -1072,13 +1198,19 @@ app.post('/api/groups/:id/tasks', async (req, res) => {
     const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
     if (!grouping) return res.status(404).json({ error: "Group reference not found" });
     
-    const { data: group } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName).single();
+    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName);
+    const group = groups?.[0];
     if (!group) return res.status(404).json({ error: "Group details not found" });
+    
+    // Fallback log if multiple found
+    if (groups && groups.length > 1) {
+      console.warn(`[DEBUG] Multiple group details found for "${grouping.groupName}" in task POST`);
+    }
 
     const { data, error } = await supabase
       .from('ss_grouptasks')
       .insert([{
-        groupID: group.smallgroupID,
+        groupId: group.smallgroupID,
         taskTitle,
         taskAssign,
         taskDeadline,
@@ -1087,7 +1219,10 @@ app.post('/api/groups/:id/tasks', async (req, res) => {
       .select()
       .single();
 
-    if (error) return res.status(500).json({ error: error.message });
+    if (error) {
+      console.error("[DEBUG] Error creating task:", error);
+      return res.status(500).json({ error: `Failed to create task: ${error.message}` });
+    }
     res.json(data);
   } catch (err) {
     res.sendStatus(403);
