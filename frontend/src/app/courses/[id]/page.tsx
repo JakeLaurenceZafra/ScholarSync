@@ -66,7 +66,7 @@ export default function CourseDetailsPage() {
     const [groupings, setGroupings] = useState<Grouping[]>([]);
     const [consultations, setConsultations] = useState<Consultation[]>([]);
 
-    const [activeTab, setActiveTab] = useState<'members' | 'groupings' | 'consultations'>('members');
+    const [activeTab, setActiveTab] = useState<'members' | 'groupings' | 'consultations' | 'ai-analysis'>('members');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
     const [copied, setCopied] = useState(false);
@@ -110,6 +110,54 @@ export default function CourseDetailsPage() {
 
     // Task Info Modal State
     const [selectedTaskInfo, setSelectedTaskInfo] = useState<Task | null>(null);
+
+    // AI Analysis State
+    const [customInstruction, setCustomInstruction] = useState('');
+    const [aiAnalysis, setAiAnalysis] = useState<string | null>(null);
+    const [runningAnalysis, setRunningAnalysis] = useState(false);
+    const [analysisError, setAnalysisError] = useState<string | null>(null);
+
+    const handleRunAnalysis = async () => {
+        if (!customInstruction.trim()) {
+            setAnalysisError('Please enter an instruction for analysis.');
+            return;
+        }
+
+        setRunningAnalysis(true);
+        setAnalysisError(null);
+        setAiAnalysis(null);
+
+        try {
+            const token = localStorage.getItem('auth_token');
+            if (!token) {
+                setAnalysisError('Authentication required.');
+                return;
+            }
+
+            const response = await axios.post(
+                'http://localhost:5000/api/ai/custom-analysis',
+                {
+                    courseId: params.id,
+                    instruction: customInstruction.trim()
+                },
+                {
+                    headers: { Authorization: `Bearer ${token}` },
+                    timeout: 30000 // 30 second timeout
+                }
+            );
+
+            setAiAnalysis(response.data.analysis);
+        } catch (err: any) {
+            console.error('AI Analysis error:', err);
+            if (err.code === 'ECONNABORTED' || err.response?.status === 408) {
+                setAnalysisError('Analysis timed out. Please refine instruction.');
+            } else {
+                setAnalysisError(err.response?.data?.error || 'Analysis failed. Please try again.');
+            }
+        } finally {
+            setRunningAnalysis(false);
+        }
+    };
 
     const toggleConsExpand = async (consId: number, attendeesString: string, groupName: string) => {
         if (expandedConsId === consId) {
@@ -161,13 +209,13 @@ export default function CourseDetailsPage() {
                     ...prev,
                     [consId]: initialParticipation
                 }));
-                
-                // Initialize local status and notes from the consultation record
-                const consRecord = consultations.find(c => c.conID === consId);
-                if (consRecord) {
-                    setStatusState(prev => ({ ...prev, [consId]: consRecord.conStat }));
-                    setNotesState(prev => ({ ...prev, [consId]: consRecord.conNotes || '' }));
-                }
+            }
+
+            // Initialize local status and notes from the consultation record
+            const consRecord = consultations.find(c => c.conID === consId);
+            if (consRecord) {
+                setStatusState(prev => ({ ...prev, [consId]: consRecord.conStat }));
+                setNotesState(prev => ({ ...prev, [consId]: consRecord.conNotes || '' }));
             }
 
             // 2. Fetch Tasks dynamically based on the stored GroupName
@@ -195,21 +243,29 @@ export default function CourseDetailsPage() {
         const currentPart = participationState[consId];
         const currentStatus = statusState[consId];
         const currentNotes = notesState[consId];
-        if (!currentAtt || !currentPart) return;
 
         const consRecord = consultations.find(c => c.conID === consId);
         if (!consRecord) return;
 
         try {
-            await Promise.all([
-                axios.put(`http://localhost:5000/api/consultations/${consId}/attendance`, 
-                    { groupName, attendance: currentAtt },
-                    { headers: { Authorization: `Bearer ${token}` } }
-                ),
-                axios.put(`http://localhost:5000/api/consultations/${consId}/participation`, 
-                    { groupName, participation: currentPart },
-                    { headers: { Authorization: `Bearer ${token}` } }
-                ),
+            const requests: Promise<any>[] = [];
+
+            if (currentAtt && currentPart) {
+                requests.push(
+                    axios.put(`http://localhost:5000/api/consultations/${consId}/attendance`, 
+                        { groupName, attendance: currentAtt },
+                        { headers: { Authorization: `Bearer ${token}` } }
+                    )
+                );
+                requests.push(
+                    axios.put(`http://localhost:5000/api/consultations/${consId}/participation`, 
+                        { groupName, participation: currentPart },
+                        { headers: { Authorization: `Bearer ${token}` } }
+                    )
+                );
+            }
+
+            requests.push(
                 axios.put(`http://localhost:5000/api/consultations/${consId}`,
                     {
                         ...consRecord,
@@ -219,7 +275,9 @@ export default function CourseDetailsPage() {
                     },
                     { headers: { Authorization: `Bearer ${token}` } }
                 )
-            ]);
+            );
+
+            await Promise.all(requests);
             
             // Update local consultations list so the UI reflects the saved changes
             setConsultations(prev => prev.map(c => c.conID === consId ? { 
@@ -541,7 +599,7 @@ export default function CourseDetailsPage() {
     if (!course) return null;
 
     const isAdmin = user?.role === 'Admin';
-    const canManageGroupings = user?.role === 'Admin' || user?.role === 'Advisers';
+    const canManageGroupings = user?.role === 'Admin' || user?.role === 'Adviser';
 
     return (
         <SidebarLayout>
@@ -607,6 +665,17 @@ export default function CourseDetailsPage() {
                                 >
                                     Consultations ({consultations.length})
                                 </button>
+                                {user?.role === 'Admin' && (
+                                    <button
+                                        onClick={() => setActiveTab('ai-analysis')}
+                                        className={`px-6 py-2 text-sm font-bold transition-colors ${activeTab === 'ai-analysis'
+                                            ? 'bg-white text-[#4FB6DF]'
+                                            : 'bg-transparent text-white border border-white border-b-0 hover:bg-white/10'
+                                            }`}
+                                    >
+                                        AI Analysis
+                                    </button>
+                                )}
                             </div>
 
                             <div className="flex items-center gap-2">
@@ -684,7 +753,7 @@ export default function CourseDetailsPage() {
                                                         className="text-black text-xs border border-gray-300 rounded px-2 py-1 outline-none focus:border-[#4FB6DF]"
                                                     >
                                                         <option value="Student">Student</option>
-                                                        <option value="Advisers">Adviser</option>
+                                                        <option value="Adviser">Adviser</option>
                                                         <option value="Admin">Admin</option>
                                                     </select>
                                                     <button onClick={() => handleSaveRole(member.account_id)} className="text-xs bg-[#4FB6DF] text-white px-3 py-1 font-bold rounded hover:bg-blue-500">
@@ -784,7 +853,7 @@ export default function CourseDetailsPage() {
 
                                             {/* Expand & Edit Icons */}
                                             <div className="flex items-center gap-4 text-[#4FB6DF]">
-                                                {(user?.role === 'Advisers' || user?.role === 'Admin') && cons.isDraft && (
+                                                {(user?.role === 'Adviser' || user?.role === 'Admin') && cons.isDraft && (
                                                     <button
                                                         onClick={(e) => {
                                                             e.stopPropagation();
@@ -818,7 +887,7 @@ export default function CourseDetailsPage() {
                                                     <div className="flex gap-6 w-full">
                                                         <div className="flex-1">
                                                             <h4 className="text-sm font-bold text-gray-700 mb-1">Status Indicator</h4>
-                                                            {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
+                                                            {(user?.role === 'Adviser' || user?.role === 'Admin') ? (
                                                                 <select 
                                                                     value={statusState[cons.conID] || cons.conStat}
                                                                     onClick={(e) => e.stopPropagation()}
@@ -912,7 +981,7 @@ export default function CourseDetailsPage() {
                                                                             {/* Participation Rating */}
                                                                             <div className="flex items-center gap-2">
                                                                                 <span className="text-xs font-semibold text-gray-500 uppercase tracking-wide">Part:</span>
-                                                                                {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
+                                                                                {(user?.role === 'Adviser' || user?.role === 'Admin') ? (
                                                                                     <select
                                                                                         value={partStatus}
                                                                                         onClick={(e) => e.stopPropagation()}
@@ -943,7 +1012,7 @@ export default function CourseDetailsPage() {
                                                                             </div>
 
                                                                             {/* Attendance Toggle */}
-                                                                            {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
+                                                                            {(user?.role === 'Adviser' || user?.role === 'Admin') ? (
                                                                                 <button
                                                                                     onClick={(e) => { e.stopPropagation(); if (cons.isDraft) toggleAttendance(cons.conID, attendee); }}
                                                                                     disabled={!cons.isDraft}
@@ -968,43 +1037,45 @@ export default function CourseDetailsPage() {
                                                                 );
                                                             })}
                                                         </div>
-                                                        <div className="mt-6 border-t border-gray-100 pt-4">
-                                                            <h4 className="text-sm font-bold text-gray-700 mb-2">Internal Notes (Adviser Only)</h4>
-                                                            {(user?.role === 'Advisers' || user?.role === 'Admin') ? (
-                                                                <textarea
-                                                                    value={notesState[cons.conID] || ''}
-                                                                    onClick={(e) => e.stopPropagation()}
-                                                                    disabled={!cons.isDraft}
-                                                                    onChange={(e) => {
-                                                                        e.stopPropagation();
-                                                                        setNotesState(prev => ({ ...prev, [cons.conID]: e.target.value }));
-                                                                    }}
-                                                                    placeholder="Add feedback or private notes here..."
-                                                                    className="w-full text-sm text-gray-700 bg-white p-3 rounded-md border border-gray-200 shadow-sm focus:ring-1 focus:ring-[#4FB6DF] focus:outline-none resize-none min-h-[80px]"
-                                                                />
-                                                            ) : (
-                                                                <div className="text-sm text-gray-600 bg-gray-100/50 p-3 rounded-md border border-gray-100 min-h-[80px]">
-                                                                    {cons.conNotes || <span className="italic text-gray-400">No notes provided for this consultation.</span>}
-                                                                </div>
-                                                            )}
-                                                        </div>
-
-                                                        {(user?.role === 'Advisers' || user?.role === 'Admin') && cons.isDraft && (
-                                                            <div className="mt-4 flex justify-end">
-                                                                <button
-                                                                    onClick={(e) => {
-                                                                        e.stopPropagation();
-                                                                        handleSaveRecords(cons.conID, cons.groupName);
-                                                                    }}
-                                                                    className="bg-[#4FB6DF] hover:bg-blue-500 text-white text-sm font-bold py-2 px-6 rounded-md shadow-sm transition-colors"
-                                                                >
-                                                                    Published
-                                                                </button>
-                                                            </div>
-                                                        )}
                                                     </div>
                                                 ) : (
                                                     <div className="text-sm text-gray-500 italic mt-2">No attendees assigned to this consultation.</div>
+                                                )}
+
+                                                {/* Internal Notes: should always be visible when expanded */}
+                                                <div className="mt-6 border-t border-gray-100 pt-4">
+                                                    <h4 className="text-sm font-bold text-gray-700 mb-2">Internal Notes (Adviser Only)</h4>
+                                                    {(user?.role === 'Adviser' || user?.role === 'Admin') ? (
+                                                        <textarea
+                                                            value={notesState[cons.conID] ?? cons.conNotes ?? ''}
+                                                            onClick={(e) => e.stopPropagation()}
+                                                            disabled={!cons.isDraft}
+                                                            onChange={(e) => {
+                                                                e.stopPropagation();
+                                                                setNotesState(prev => ({ ...prev, [cons.conID]: e.target.value }));
+                                                            }}
+                                                            placeholder="Add feedback or private notes here..."
+                                                            className="w-full text-sm text-gray-700 bg-white p-3 rounded-md border border-gray-200 shadow-sm focus:ring-1 focus:ring-[#4FB6DF] focus:outline-none resize-none min-h-[80px]"
+                                                        />
+                                                    ) : (
+                                                        <div className="text-sm text-gray-600 bg-gray-100/50 p-3 rounded-md border border-gray-100 min-h-[80px]">
+                                                            {cons.conNotes || <span className="italic text-gray-400">No notes provided for this consultation.</span>}
+                                                        </div>
+                                                    )}
+                                                </div>
+
+                                                {(user?.role === 'Adviser' || user?.role === 'Admin') && cons.isDraft && (
+                                                    <div className="mt-4 flex justify-end">
+                                                        <button
+                                                            onClick={(e) => {
+                                                                e.stopPropagation();
+                                                                handleSaveRecords(cons.conID, cons.groupName);
+                                                            }}
+                                                            className="bg-[#4FB6DF] hover:bg-blue-500 text-white text-sm font-bold py-2 px-6 rounded-md shadow-sm transition-colors"
+                                                        >
+                                                            Published
+                                                        </button>
+                                                    </div>
                                                 )}
                                             </div>
                                         )}
@@ -1012,6 +1083,87 @@ export default function CourseDetailsPage() {
                                 )) : (
                                     <div className="text-white/80 italic text-sm py-4">No consultations created yet.</div>
                                 )
+                            )}
+
+                            {/* --------- AI ANALYSIS TAB --------- */}
+                            {activeTab === 'ai-analysis' && user?.role === 'Admin' && (
+                                <div className="space-y-6">
+                                    <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100">
+                                        <h3 className="text-lg font-bold text-gray-900 mb-4">Custom AI Consultation Analysis</h3>
+                                        <p className="text-sm text-gray-600 mb-4">
+                                            Enter a custom instruction to generate AI-assisted insights across all groups in this course.
+                                            The analysis will be based on consultation records and provide advisory insights only.
+                                        </p>
+                                        
+                                        <div className="space-y-4">
+                                            <div>
+                                                <label className="block text-sm font-semibold text-gray-700 mb-2">
+                                                    Analysis Instruction <span className="text-red-500">*</span>
+                                                </label>
+                                                <textarea
+                                                    value={customInstruction}
+                                                    onChange={(e) => setCustomInstruction(e.target.value)}
+                                                    placeholder="e.g., Summarize recurring revision themes across groups, or Analyze participation patterns in recent consultations..."
+                                                    rows={4}
+                                                    className="w-full border border-gray-300 rounded-md px-3 py-2 text-sm text-black focus:outline-none focus:border-[#4FB6DF] focus:ring-1 focus:ring-[#4FB6DF] resize-none"
+                                                />
+                                            </div>
+                                            
+                                            <div className="flex justify-end">
+                                                <button
+                                                    onClick={handleRunAnalysis}
+                                                    disabled={runningAnalysis || !customInstruction.trim()}
+                                                    className="bg-[#4FB6DF] text-white px-6 py-2 rounded-md text-sm font-bold shadow hover:bg-blue-600 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center gap-2"
+                                                >
+                                                    {runningAnalysis ? (
+                                                        <>
+                                                            <div className="w-4 h-4 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                                            Running Analysis...
+                                                        </>
+                                                    ) : (
+                                                        <>
+                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                                                            </svg>
+                                                            Run Analysis
+                                                        </>
+                                                    )}
+                                                </button>
+                                            </div>
+                                        </div>
+                                    </div>
+
+                                    {analysisError && (
+                                        <div className="bg-red-50 border border-red-200 rounded-lg p-4">
+                                            <div className="flex items-center gap-2">
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-red-500" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 8v4m0 4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z" />
+                                                </svg>
+                                                <span className="text-sm font-semibold text-red-800">Analysis Error</span>
+                                            </div>
+                                            <p className="text-sm text-red-700 mt-1">{analysisError}</p>
+                                        </div>
+                                    )}
+
+                                    {aiAnalysis && (
+                                        <div className="bg-white p-6 rounded-lg shadow-sm border border-gray-100">
+                                            <div className="flex items-center gap-2 mb-4">
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-[#4FB6DF]" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9.663 17h4.673M12 3v1m6.364 1.636l-.707.707M21 12h-1M4 12H3m3.343-5.657l-.707-.707m2.828 9.9a5 5 0 117.072 0l-.548.547A3.374 3.374 0 0014 18.469V19a2 2 0 11-4 0v-.531c0-.895-.356-1.754-.988-2.386l-.548-.547z" />
+                                                </svg>
+                                                <h4 className="text-lg font-bold text-gray-900">AI Analysis Results</h4>
+                                            </div>
+                                            <div className="bg-gray-50 p-4 rounded-md border border-gray-200">
+                                                <div className="text-sm text-gray-700 whitespace-pre-wrap leading-relaxed">
+                                                    {aiAnalysis}
+                                                </div>
+                                            </div>
+                                            <div className="mt-4 text-xs text-gray-500 italic">
+                                                This analysis is advisory and non-authoritative. Use as a supplement to your professional judgment.
+                                            </div>
+                                        </div>
+                                    )}
+                                </div>
                             )}
                         </div>
 

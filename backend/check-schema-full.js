@@ -4,7 +4,7 @@ import 'dotenv/config';
 const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_ANON_KEY);
 
 async function check() {
-    const tables = ['ss_account', 'ss_courses', 'ss_enrollments', 'ss_groupings', 'ss_group', 'ss_consultation', 'ss_attendance', 'ss_participation'];
+    const tables = ['ss_account', 'ss_courses', 'ss_enrollments', 'ss_groupings', 'ss_group', 'ss_consultation', 'ss_attendance', 'ss_participation', 'ss_grouptasks'];
     
     for (const table of tables) {
         const { data, error } = await supabase.from(table).select('*').limit(1);

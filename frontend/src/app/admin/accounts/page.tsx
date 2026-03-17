@@ -112,7 +112,7 @@ export default function AdminAccountsPage() {
                                             className="border border-gray-300 rounded px-2 py-1 text-sm bg-white focus:outline-none focus:ring-1 focus:ring-indigo-500"
                                         >
                                             <option value="Student">Student</option>
-                                            <option value="Advisers">Advisers</option>
+                                            <option value="Adviser">Adviser</option>
                                             <option value="Admin">Admin</option>
                                         </select>
                                     </td>

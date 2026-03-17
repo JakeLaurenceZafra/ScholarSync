@@ -1,4 +1,5 @@
 import express from 'express';
+import type { Request, Response, NextFunction } from 'express';
 import passport from 'passport';
 import { Strategy as GoogleStrategy } from 'passport-google-oauth20';
 import jwt from 'jsonwebtoken';
@@ -7,10 +8,17 @@ import cors from 'cors';
 import 'dotenv/config';
 import { GoogleDocsService } from './googleDocsService.js';
 import fs from 'fs';
+import { GoogleGenerativeAI } from "@google/generative-ai";
+import aiRoutes from './routes/ai.routes.js';
+import db from './Config/supabaseconfig.js';
+
+console.log("DEBUG: JWT_SECRET from env:", process.env.JWT_SECRET);
 
 const supabaseUrl = process.env.SUPABASE_URL!;
 const supabaseKey = process.env.SUPABASE_ANON_KEY!;
 const supabase = createClient(supabaseUrl, supabaseKey);
+const JWT_SECRET = process.env.JWT_SECRET || "test";
+const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY!);
 
 const app = express();
 
@@ -19,6 +27,7 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+app.use('/api/ai', aiRoutes);
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID!,
@@ -211,7 +220,11 @@ const verifyInstructor = (req: express.Request, res: express.Response, next: exp
 
   jwt.verify(token, process.env.JWT_SECRET || "test", (err: any, user: any) => {
     if (err) return res.sendStatus(403);
-    if (user.role !== 'Admin' && user.role !== 'Advisers') {
+    // Instructor = Admin or Adviser
+    if (
+      user.role !== 'Admin' &&
+      user.role !== 'Adviser'
+    ) {
       return res.status(403).json({ error: "Instructor access required" });
     }
     (req as any).user = user;
@@ -238,7 +251,7 @@ app.get('/api/courses', async (req, res) => {
       enrolledCourseIds = enrollments.map(e => e.course_id);
     }
 
-    if (user.role === 'Admin' || user.role === 'Advisers') {
+    if (user.role === 'Admin' || user.role === 'Adviser') {
       // Fetch created courses
       const { data: createdCourses, error: createdError } = await supabase
         .from('ss_courses')
@@ -414,24 +427,63 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express
   let actionsStr = '';
 
   if (groupName) {
-    // Find all users assigned to this group
-    const { data: students } = await supabase
-      .from('ss_account')
-      .select('accountName')
-      .eq('accountGroup', groupName);
+    // Build attendees list based on the ss_group membership, so that
+    // the leader (real student) is always included even if accountGroup
+    // was not set correctly.
+    const { data: groupRows } = await supabase
+      .from('ss_group')
+      .select('member1, member2, member3, member4, member5')
+      .eq('groupName', groupName);
 
-    if (students && students.length > 0) {
-      attendeesStr = students.map(s => s.accountName).join(', ');
+    const groupRow = groupRows?.[0];
+    const memberEmails = groupRow
+      ? [groupRow.member1, groupRow.member2, groupRow.member3, groupRow.member4, groupRow.member5].filter(Boolean)
+      : [];
+
+    if (memberEmails.length > 0) {
+      const { data: accounts } = await supabase
+        .from('ss_account')
+        .select('accountName, accountEmail')
+        .in('accountEmail', memberEmails as string[]);
+
+      const nameByEmail = new Map<string, string>();
+      (accounts || []).forEach(a => {
+        if (a.accountEmail) {
+          nameByEmail.set(a.accountEmail, a.accountName || a.accountEmail);
+        }
+      });
+
+      const orderedNames = (memberEmails as string[]).map(email =>
+        nameByEmail.get(email) || email
+      );
+
+      attendeesStr = orderedNames.join(', ');
+    } else {
+      // Fallback: use accountGroup mapping if ss_group row was not found
+      const { data: students } = await supabase
+        .from('ss_account')
+        .select('accountName')
+        .eq('accountGroup', groupName);
+
+      if (students && students.length > 0) {
+        attendeesStr = students.map(s => s.accountName).join(', ');
+      }
     }
 
     // Fetch tasks for the group to auto-populate conAction
-    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', groupName);
+    const { data: groups } = await supabase
+      .from('ss_group')
+      .select('smallgroupID')
+      .eq('groupName', groupName);
     const group = groups?.[0];
     if (group) {
-        const { data: tasks } = await supabase.from('ss_grouptasks').select('taskTitle').eq('groupId', group.smallgroupID);
-        if (tasks && tasks.length > 0) {
-            actionsStr = tasks.map(t => `- ${t.taskTitle}`).join('\n');
-        }
+      const { data: tasks } = await supabase
+        .from('ss_grouptasks')
+        .select('taskTitle')
+        .eq('groupId', group.smallgroupID);
+      if (tasks && tasks.length > 0) {
+        actionsStr = tasks.map(t => `- ${t.taskTitle}`).join('\n');
+      }
     }
   }
 
@@ -468,82 +520,66 @@ app.post('/api/courses/:id/consultations', verifyInstructor, async (req: express
   res.json(data);
 });
 
+const parseId = (id: string) => {
+  const parsed = parseInt(id, 10);
+  if (isNaN(parsed)) throw new Error("Invalid ID format");
+  return parsed;
+};
+
+// UPDATE consultation
 app.put('/api/consultations/:id', verifyInstructor, async (req: express.Request, res: express.Response) => {
-  const conID = req.params.id;
-  const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName, conNotes } = req.body;
+  try {
+    const conID = parseId(req.params.id);
+    const { conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName, conNotes } = req.body;
 
-  const { data, error } = await supabase
-    .from('ss_consultation')
-    .update({
-      conDate,
-      conType,
-      conMil,
-      conSum,
-      conAction,
-      isDraft,
-      conStat,
-      groupName,
-      conNotes
-    })
-    .eq('conID', conID)
-    .select()
-    .single();
+    const { data, error } = await supabase
+      .from('ss_consultation')
+      .update({ conDate, conType, conMil, conSum, conAction, isDraft, conStat, groupName, conNotes })
+      .eq('conID', conID)
+      .select()
+      .single();
 
-  if (error) return res.status(500).json({ error: error.message });
+    if (error) throw error;
 
-  // Archive if published
-  if (data && !data.isDraft) {
-    try {
-      const user = (req as any).user;
-      await GoogleDocsService.archiveConsultation(data, user.email);
-    } catch (archiveError) {
-      console.error("Archive failed:", archiveError);
+    if (data && !data.isDraft) {
+      try {
+        await (global as any).GoogleDocsService.archiveConsultation(data, (req as any).user.email);
+      } catch (archiveError) {
+        console.error("Archive failed:", archiveError);
+      }
     }
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
-
-  res.json(data);
 });
 
-// GET existing attendance record
+// GET attendance
 app.get('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
-  const conID = req.params.id;
-
   try {
+    const conID = parseId(req.params.id);
     const { data: record, error } = await supabase
       .from('ss_attendance')
       .select('*')
       .eq('conID', conID)
-      .single();
+      .maybeSingle();
 
     if (error || !record) return res.json(null);
-
-    // Collect IDs
-    const idList = [
-      record.oneID, record.twoID, record.threeID, record.fourID, record.fiveID
-    ].filter(Boolean);
-
-    if (idList.length === 0) return res.json({});
-
-    // Fetch matching accounts to translate ID -> Name
-    const { data: accounts } = await supabase
-      .from('ss_account')
-      .select('account_id, accountName')
-      .in('account_id', idList);
-
+    
+    // Schema columns are one_id, two_id, ... not oneID, etc.
+    const idList = [record.one_id, record.two_id, record.three_id, record.four_id, record.five_id].filter(Boolean);
+    const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
     const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
-
     const attendanceMap: Record<string, string> = {};
-    const extract = (idVal: number | null, statusVal: string | null) => {
-      if (idVal && accountMap.has(idVal)) {
-        attendanceMap[accountMap.get(idVal)!] = statusVal || 'Present';
-      }
+    
+    const extract = (id: number | null, status: string | null) => {
+      if (id && accountMap.has(id)) attendanceMap[accountMap.get(id)!] = status || 'Present';
     };
-
-    extract(record.oneID, record.mem1);
-    extract(record.twoID, record.mem2);
-    extract(record.threeID, record.mem3);
-    extract(record.fourID, record.mem4);
-    extract(record.fiveID, record.mem5);
+    extract(record.one_id, record.mem1);
+    extract(record.two_id, record.mem2);
+    extract(record.three_id, record.mem3);
+    extract(record.four_id, record.mem4);
+    extract(record.five_id, record.mem5);
 
     res.json(attendanceMap);
   } catch (err: any) {
@@ -551,104 +587,67 @@ app.get('/api/consultations/:id/attendance', verifyInstructor, async (req, res) 
   }
 });
 
-// UPSERT attendance record
+// UPSERT attendance
 app.put('/api/consultations/:id/attendance', verifyInstructor, async (req, res) => {
-  const conID = req.params.id;
-  const { groupName, attendance } = req.body; // attendance is Record<string, 'Present' | 'Absent'>
-
-  if (!groupName || !attendance) return res.status(400).json({ error: "Missing required properties." });
-
   try {
-    // 1. Get Group Structure
-    const { data: group } = await supabase
-      .from('ss_group')
-      .select('member1, member2, member3, member4, member5')
-      .eq('groupName', groupName)
-      .single();
+    const conID = parseId(req.params.id);
+    const { groupName, attendance } = req.body;
 
+    const { data: group } = await supabase.from('ss_group').select('member1, member2, member3, member4, member5').eq('groupName', groupName).single();
     if (!group) return res.status(404).json({ error: "Linked group not found" });
 
-    // 2. Map Emails to Account IDs via ss_account
     const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
-    const { data: accounts } = await supabase
-      .from('ss_account')
-      .select('account_id, accountEmail, accountName')
-      .in('accountEmail', emailList);
-
+    const { data: accounts } = await supabase.from('ss_account').select('account_id, accountEmail, accountName').in('accountEmail', emailList);
     const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
-
-    // Helper to get ID and Status
+    
     const getDetails = (email: string | null) => {
       if (!email || !accountByEmail.has(email)) return { id: null, status: null };
       const acct = accountByEmail.get(email)!;
       return { id: acct.account_id, status: attendance[acct.accountName] || 'Present' };
     };
 
-    const m1 = getDetails(group.member1);
-    const m2 = getDetails(group.member2);
-    const m3 = getDetails(group.member3);
-    const m4 = getDetails(group.member4);
-    const m5 = getDetails(group.member5);
-
     const upsertPayload = {
       conID,
-      oneID: m1.id, mem1: m1.status,
-      twoID: m2.id, mem2: m2.status,
-      threeID: m3.id, mem3: m3.status,
-      fourID: m4.id, mem4: m4.status,
-      fiveID: m5.id, mem5: m5.status
+      one_id: getDetails(group.member1).id, mem1: getDetails(group.member1).status,
+      two_id: getDetails(group.member2).id, mem2: getDetails(group.member2).status,
+      three_id: getDetails(group.member3).id, mem3: getDetails(group.member3).status,
+      four_id: getDetails(group.member4).id, mem4: getDetails(group.member4).status,
+      five_id: getDetails(group.member5).id, mem5: getDetails(group.member5).status
     };
 
-    // Use conID as conflict resolution key if supported, otherwise update or insert
-    const { data: existing } = await supabase.from('ss_attendance').select('attID').eq('conID', conID).single();
+    const { data: existing, error: existingErr } = await supabase
+      .from('ss_attendance')
+      .select('att_id')
+      .eq('conID', conID)
+      .maybeSingle();
 
-    if (existing) {
+    if (!existingErr && existing) {
       await supabase.from('ss_attendance').update(upsertPayload).eq('conID', conID);
     } else {
       await supabase.from('ss_attendance').insert([upsertPayload]);
     }
 
-    res.json({ message: "Attendance saved successfully" });
+    res.json({ message: "Attendance saved" });
   } catch (err: any) {
     res.status(500).json({ error: err.message });
   }
 });
 
-// GET existing participation record
+// GET participation
 app.get('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
-  const conID = req.params.id;
-
   try {
-    const { data: record, error } = await supabase
-      .from('ss_participation')
-      .select('*')
-      .eq('conID', conID)
-      .single();
-
+    const conID = parseId(req.params.id);
+    const { data: record, error } = await supabase.from('ss_participation').select('*').eq('conID', conID).single();
     if (error || !record) return res.json(null);
-
-    // Collect IDs
-    const idList = [
-      record.mem1, record.mem2, record.mem3, record.mem4, record.mem5
-    ].filter(Boolean);
-
-    if (idList.length === 0) return res.json({});
-
-    // Fetch matching accounts to translate ID -> Name
-    const { data: accounts } = await supabase
-      .from('ss_account')
-      .select('account_id, accountName')
-      .in('account_id', idList);
-
+    
+    const idList = [record.mem1, record.mem2, record.mem3, record.mem4, record.mem5].filter(Boolean);
+    const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
     const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
-
     const participationMap: Record<string, string> = {};
-    const extract = (idVal: number | null, ratingVal: string | null) => {
-      if (idVal && accountMap.has(idVal)) {
-        participationMap[accountMap.get(idVal)!] = ratingVal || 'Moderate';
-      }
+    
+    const extract = (id: number | null, rating: string | null) => {
+        if (id && accountMap.has(id)) participationMap[accountMap.get(id)!] = rating || 'Moderate';
     };
-
     extract(record.mem1, record.part1);
     extract(record.mem2, record.part2);
     extract(record.mem3, record.part3);
@@ -661,131 +660,48 @@ app.get('/api/consultations/:id/participation', verifyInstructor, async (req, re
   }
 });
 
-// UPSERT participation record
+// UPSERT participation
 app.put('/api/consultations/:id/participation', verifyInstructor, async (req, res) => {
-  const conID = req.params.id;
-  const { groupName, participation } = req.body; // participation is Record<string, 'High' | 'Moderate' | 'Low'>
-
-  if (!groupName || !participation) return res.status(400).json({ error: "Missing required properties." });
-
   try {
-    // 1. Get Group Structure
-    const { data: group } = await supabase
-      .from('ss_group')
-      .select('member1, member2, member3, member4, member5')
-      .eq('groupName', groupName)
-      .single();
+    const conID = parseId(req.params.id);
+    const { groupName, participation } = req.body;
 
+    const { data: group } = await supabase.from('ss_group').select('member1, member2, member3, member4, member5').eq('groupName', groupName).single();
     if (!group) return res.status(404).json({ error: "Linked group not found" });
 
-    // 2. Map Emails to Account IDs via ss_account
     const emailList = [group.member1, group.member2, group.member3, group.member4, group.member5].filter(Boolean);
-    const { data: accounts } = await supabase
-      .from('ss_account')
-      .select('account_id, accountEmail, accountName')
-      .in('accountEmail', emailList);
-
+    const { data: accounts } = await supabase.from('ss_account').select('account_id, accountEmail, accountName').in('accountEmail', emailList);
     const accountByEmail = new Map(accounts?.map(a => [a.accountEmail, a]) || []);
-
-    // Helper to get ID and Rating
+    
     const getDetails = (email: string | null) => {
       if (!email || !accountByEmail.has(email)) return { id: null, rating: null };
       const acct = accountByEmail.get(email)!;
       return { id: acct.account_id, rating: participation[acct.accountName] || 'Moderate' };
     };
 
-    const m1 = getDetails(group.member1);
-    const m2 = getDetails(group.member2);
-    const m3 = getDetails(group.member3);
-    const m4 = getDetails(group.member4);
-    const m5 = getDetails(group.member5);
-
     const upsertPayload = {
       conID,
-      mem1: m1.id, part1: m1.rating,
-      mem2: m2.id, part2: m2.rating,
-      mem3: m3.id, part3: m3.rating,
-      mem4: m4.id, part4: m4.rating,
-      mem5: m5.id, part5: m5.rating
+      mem1: getDetails(group.member1).id, part1: getDetails(group.member1).rating,
+      mem2: getDetails(group.member2).id, part2: getDetails(group.member2).rating,
+      mem3: getDetails(group.member3).id, part3: getDetails(group.member3).rating,
+      mem4: getDetails(group.member4).id, part4: getDetails(group.member4).rating,
+      mem5: getDetails(group.member5).id, part5: getDetails(group.member5).rating
     };
 
-    const { data: existing } = await supabase.from('ss_participation').select('partID').eq('conID', conID).single();
+    const { data: existing, error: existingErr } = await supabase
+      .from('ss_participation')
+      .select('part_id')
+      .eq('conID', conID)
+      .maybeSingle();
 
-    if (existing) {
+    if (!existingErr && existing) {
       await supabase.from('ss_participation').update(upsertPayload).eq('conID', conID);
     } else {
       await supabase.from('ss_participation').insert([upsertPayload]);
     }
 
-    res.json({ message: "Participation saved successfully" });
+    res.json({ message: "Participation saved" });
   } catch (err: any) {
-    res.status(500).json({ error: err.message });
-  }
-});
-
-// STANDALONE DOC EXPORT
-app.post('/api/consultations/:id/export-docs', verifyInstructor, async (req: any, res: any) => {
-  const conID = req.params.id;
-  const userPayload = req.user; // Set by verifyInstructor
-
-  try {
-    // 1. Get Consultation details
-    const { data: consultation, error: conError } = await supabase
-      .from('ss_consultation')
-      .select('*')
-      .eq('conID', conID)
-      .single();
-
-    if (conError || !consultation) return res.status(404).json({ error: "Consultation not found" });
-
-    // Use the email of the person who clicked the button (Admin or Adviser)
-    const exportUserEmail = userPayload.email;
-
-    // 3. Fetch Attendance
-    const { data: attRecord } = await supabase.from('ss_attendance').select('*').eq('conID', conID).single();
-    const attendanceMap: Record<string, string> = {};
-    if (attRecord) {
-        const idList = [attRecord.oneID, attRecord.twoID, attRecord.threeID, attRecord.fourID, attRecord.fiveID].filter(Boolean);
-        const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
-        const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
-        
-        const extractAtt = (idVal: number | null, statusVal: string | null) => {
-            if (idVal && accountMap.has(idVal)) {
-                attendanceMap[accountMap.get(idVal)!] = statusVal || 'Present';
-            }
-        };
-        extractAtt(attRecord.oneID, attRecord.mem1);
-        extractAtt(attRecord.twoID, attRecord.mem2);
-        extractAtt(attRecord.threeID, attRecord.mem3);
-        extractAtt(attRecord.fourID, attRecord.mem4);
-        extractAtt(attRecord.fiveID, attRecord.mem5);
-    }
-
-    // 4. Fetch Participation
-    const { data: partRecord } = await supabase.from('ss_participation').select('*').eq('conID', conID).single();
-    const participationMap: Record<string, string> = {};
-    if (partRecord) {
-        const idList = [partRecord.mem1, partRecord.mem2, partRecord.mem3, partRecord.mem4, partRecord.mem5].filter(Boolean);
-        const { data: accounts } = await supabase.from('ss_account').select('account_id, accountName').in('account_id', idList);
-        const accountMap = new Map(accounts?.map(a => [a.account_id, a.accountName]) || []);
-        
-        const extractPart = (idVal: number | null, ratingVal: string | null) => {
-            if (idVal && accountMap.has(idVal)) {
-                participationMap[accountMap.get(idVal)!] = ratingVal || 'Moderate';
-            }
-        };
-        extractPart(partRecord.mem1, partRecord.part1);
-        extractPart(partRecord.mem2, partRecord.part2);
-        extractPart(partRecord.mem3, partRecord.part3);
-        extractPart(partRecord.mem4, partRecord.part4);
-        extractPart(partRecord.mem5, partRecord.part5);
-    }
-
-    const docUrl = await GoogleDocsService.exportStandaloneJournal(consultation, exportUserEmail, attendanceMap, participationMap);
-    res.json({ url: docUrl });
-
-  } catch (err: any) {
-    console.error("Export Docs Error:", err);
     res.status(500).json({ error: err.message });
   }
 });
@@ -1114,58 +1030,34 @@ app.post('/api/courses/:id/groups', async (req, res) => {
 
 // Group Endpoints for Detailed View & Tasks
 app.get('/api/groups/:id', async (req, res) => {
-  const authHeader = req.headers.authorization;
-  const token = authHeader && authHeader.split(' ')[1];
+  const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.sendStatus(401);
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
-    const groupingIdInput = req.params.id;
-    const groupingId = Number(groupingIdInput);
+    jwt.verify(token, JWT_SECRET);
+    const groupingId = Number(req.params.id);
 
-    if (isNaN(groupingId)) {
-      console.warn(`[DEBUG] Invalid group ID format received: "${groupingIdInput}"`);
-      return res.status(400).json({ error: "Invalid group ID format" });
-    }
-
-    // 1. Fetch the group name from ss_groupings using the ID from the URL
     const { data: grouping, error: groupingError } = await supabase
       .from('ss_groupings')
-      .select('groupName, courseID')
+      .select('groupName')
       .eq('groupID', groupingId)
       .single();
-    
-    console.log(`[DEBUG] Attempting to find grouping for ID ${groupingId}. Found:`, grouping, "Error:", groupingError);
-    fs.appendFileSync('c:/Users/Baku/Desktop/ScholarSync/ScholarSync/backend/debug.log', `[${new Date().toISOString()}] REQ ID=${groupingId} FOUND_NAME="${grouping?.groupName}"\n`);
-    
-    if (groupingError || !grouping) {
-      return res.status(404).json({ error: `Group reference not found for ID ${groupingId}` });
+
+    if (groupingError || !grouping?.groupName) {
+      return res.status(404).json({ error: "Group not found" });
     }
 
-    // 2. Fetch the actual group details from ss_group using the groupName
-    // NOTE: Possible collision if multiple courses share groupName
     const { data: groups, error } = await supabase
       .from('ss_group')
       .select('*')
-      .eq('groupName', grouping.groupName);
+      .eq('groupName', grouping.groupName)
+      .single();
 
-    if (error) {
-      console.error("[DEBUG] Error fetching group details:", error);
-      return res.status(500).json({ error: `Internal Server Error: ${error.message}` });
-    }
-
-    if (!groups || groups.length === 0) {
-      console.warn(`[DEBUG] No details found for groupName "${grouping.groupName}"`);
-      return res.status(404).json({ error: `Group details not found for name "${grouping.groupName}"` });
-    }
-
-    if (groups.length > 1) {
-       console.warn(`[DEBUG] Multiple groups found for name "${grouping.groupName}". Current schema causes ambiguity.`);
-    }
-
-    res.json(groups[0]);
-  } catch (err) {
-    res.sendStatus(403);
+    if (error) throw error;
+    res.json(groups);
+  } catch (err: any) {
+    console.error("DEBUG - Group fetch error:", err.message);
+    res.status(500).json({ error: "Failed to fetch group details" });
   }
 });
 
@@ -1198,15 +1090,172 @@ app.get('/api/groups/:id/tasks', async (req, res) => {
     const { data, error } = await supabase
       .from('ss_grouptasks')
       .select('*')
-      .eq('groupId', group.smallgroupID);
+      .eq('groupId', group.smallgroupID)
+      .eq('archived', false);
 
     if (error) {
       console.error(`[DEBUG] Error fetching tasks for group ${group.smallgroupID}:`, error);
       return res.status(500).json({ error: `Failed to fetch tasks: ${error.message}` });
     }
-    res.json(data || []);
+
+    // Process comments to include dates
+    const processedData = (data || []).map(task => {
+      let comments = [];
+      try {
+        if (task.comments) {
+          if (typeof task.comments === 'string') {
+            comments = JSON.parse(task.comments);
+          } else if (Array.isArray(task.comments)) {
+            comments = task.comments;
+          } else {
+            comments = [{ text: task.comments, date: new Date().toISOString() }];
+          }
+        }
+      } catch (e) {
+        // If parsing fails, treat as legacy string
+        comments = [{ text: task.comments || '', date: new Date().toISOString() }];
+      }
+      return {
+        ...task,
+        comments: comments
+      };
+    });
+
+    res.json(processedData);
   } catch (err) {
     res.sendStatus(403);
+  }
+});
+
+// GET archived tasks for a group
+app.get('/api/groups/:id/tasks/archived', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const groupingId = Number(req.params.id);
+
+    if (isNaN(groupingId)) {
+      return res.status(400).json({ error: "Invalid group ID format" });
+    }
+
+    // Find smallgroupID for task linking
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName);
+    const group = groups?.[0];
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+    
+    // Fallback log if multiple found
+    if (groups && groups.length > 1) {
+      console.warn(`[DEBUG] Multiple group details found for "${grouping.groupName}" in archived task GET`);
+    }
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .select('*')
+      .eq('groupId', group.smallgroupID)
+      .eq('archived', true);
+
+    if (error) {
+      console.error(`[DEBUG] Error fetching archived tasks for group ${group.smallgroupID}:`, error);
+      return res.status(500).json({ error: `Failed to fetch archived tasks: ${error.message}` });
+    }
+
+    // Process comments to include dates
+    const processedData = (data || []).map(task => {
+      let comments = [];
+      try {
+        if (task.comments) {
+          if (typeof task.comments === 'string') {
+            comments = JSON.parse(task.comments);
+          } else if (Array.isArray(task.comments)) {
+            comments = task.comments;
+          } else {
+            comments = [{ text: task.comments, date: new Date().toISOString() }];
+          }
+        }
+      } catch (e) {
+        // If parsing fails, treat as legacy string
+        comments = [{ text: task.comments || '', date: new Date().toISOString() }];
+      }
+      return {
+        ...task,
+        comments: comments
+      };
+    });
+
+    res.json(processedData);
+  } catch (err) {
+    res.sendStatus(403);
+  }
+});
+
+// Member Journals for a group
+app.post('/api/groups/:id/journals', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, JWT_SECRET);
+    const groupingId = Number(req.params.id);
+    const {
+      courseId,
+      groupName,
+      memberEmail,
+      journalDate,
+      taskUpdates,
+      actionPlans,
+      issues,
+      minutes
+    } = req.body;
+
+    if (!courseId || !groupName || !memberEmail || !journalDate) {
+      return res.status(400).json({ error: "Missing required journal fields" });
+    }
+
+    // Optional safety: ensure the grouping ID matches the groupName
+    const { data: grouping } = await supabase
+      .from('ss_groupings')
+      .select('groupName, courseID')
+      .eq('groupID', groupingId)
+      .maybeSingle();
+
+    if (!grouping || grouping.groupName !== groupName) {
+      return res.status(404).json({ error: "Group not found for this journal" });
+    }
+
+    const { data, error } = await supabase
+      .from('ss_member_journals')
+      .insert([{
+        courseID: courseId,
+        groupName,
+        member_email: memberEmail,
+        journal_date: journalDate,
+        task_updates: taskUpdates || [],
+        action_plans: actionPlans || [],
+        issues: issues || [],
+        minutes_date: minutes?.dateOfConsultation || null,
+        minutes_adviser: minutes?.adviser || null,
+        minutes_key_points: minutes?.keyDiscussionPoints || null,
+        minutes_action_items: minutes?.actionItems || null,
+        minutes_action_deadlines: minutes?.actionDeadlines || null,
+        next_consultation: minutes?.nextConsultation || null
+      }])
+      .select('*')
+      .single();
+
+    if (error) {
+      return res.status(500).json({ error: error.message });
+    }
+
+    res.json(data);
+  } catch (err: any) {
+    console.error("Member journal error:", err.message);
+    res.status(500).json({ error: err.message || "Failed to save member journal" });
   }
 });
 
@@ -1293,6 +1342,126 @@ app.post('/api/groups/:id/tasks', async (req, res) => {
     res.json(data);
   } catch (err) {
     res.sendStatus(403);
+  }
+});
+
+app.put('/api/groups/:id/tasks/:taskId', verifyInstructor, async (req, res) => {
+  const groupingId = Number(req.params.id);
+  const taskId = Number(req.params.taskId);
+  const user = (req as any).user;
+
+  if (isNaN(groupingId) || isNaN(taskId)) {
+    return res.status(400).json({ error: "Invalid group ID or task ID format" });
+  }
+
+  const { taskTitle, taskAssign, taskDeadline, taskInfo, progressRating, comments, completed } = req.body;
+
+  // Validate progressRating if provided
+  if (progressRating !== undefined && (progressRating < 1 || progressRating > 5)) {
+    return res.status(400).json({ error: "Progress rating must be between 1 and 5" });
+  }
+
+  // Build update object
+  const updateData: any = {};
+  if (taskTitle !== undefined) updateData.taskTitle = taskTitle;
+  if (taskAssign !== undefined) updateData.taskAssign = taskAssign;
+  if (taskDeadline !== undefined) updateData.taskDeadline = taskDeadline;
+  if (taskInfo !== undefined) updateData.taskInfo = taskInfo;
+  if (progressRating !== undefined) updateData.progressRating = progressRating;
+  if (comments !== undefined) {
+    // Store comments as JSON string in TEXT column
+    if (typeof comments === 'string') {
+      updateData.comments = JSON.stringify([{ text: comments, date: new Date().toISOString() }]);
+    } else {
+      // Ensure it's stored as JSON string, even if empty array
+      const commentsArray = Array.isArray(comments) ? comments : [comments];
+      updateData.comments = JSON.stringify(commentsArray);
+    }
+  }
+  if (completed !== undefined) {
+    updateData.completed = completed;
+    // Archive the task when it's marked as completed
+    if (completed) {
+      updateData.archived = true;
+    }
+  }
+
+  if (Object.keys(updateData).length === 0) {
+    return res.status(400).json({ error: "No fields to update" });
+  }
+
+  try {
+    // First, get the correct groupId for this task
+    const { data: taskData } = await supabase
+      .from('ss_grouptasks')
+      .select('groupId')
+      .eq('taskID', taskId)
+      .single();
+
+    if (!taskData) {
+      return res.status(404).json({ error: "Task not found" });
+    }
+
+    // Verify the task belongs to the requested group
+    const { data: grouping } = await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single();
+    if (!grouping) return res.status(404).json({ error: "Group reference not found" });
+    
+    const { data: groups } = await supabase.from('ss_group').select('smallgroupID').eq('groupName', grouping.groupName);
+    const group = groups?.[0];
+    if (!group) return res.status(404).json({ error: "Group details not found" });
+
+    if (taskData.groupId !== group.smallgroupID) {
+      return res.status(403).json({ error: "Task does not belong to this group" });
+    }
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .update(updateData)
+      .eq('taskID', taskId)
+      .select()
+      .single();
+
+    if (error) {
+      console.error("[DEBUG] Error updating task:", error);
+      return res.status(500).json({ error: `Failed to update task: ${error.message}` });
+    }
+    res.json(data);
+  } catch (err) {
+    console.error("[DEBUG] Error in task update:", err);
+    res.status(500).json({ error: "Internal server error" });
+  }
+});
+
+app.delete('/api/groups/:id/tasks/:taskId', verifyInstructor, async (req, res) => {
+  const groupingId = Number(req.params.id);
+  const taskId = Number(req.params.taskId);
+  const user = (req as any).user;
+
+  if (isNaN(groupingId) || isNaN(taskId)) {
+    return res.status(400).json({ error: "Invalid group ID or task ID format" });
+  }
+
+  try {
+    // First verify the task belongs to the group
+    const groupData = await supabase.from('ss_group').select('smallgroupID').eq('groupName', (await supabase.from('ss_groupings').select('groupName').eq('groupID', groupingId).single()).data?.groupName).single();
+    if (!groupData.data) {
+      return res.status(404).json({ error: "Group not found" });
+    }
+
+    const { data, error } = await supabase
+      .from('ss_grouptasks')
+      .delete()
+      .eq('taskID', taskId)
+      .eq('groupId', groupData.data.smallgroupID);
+
+    if (error) {
+      console.error("[DEBUG] Error deleting task:", error);
+      return res.status(500).json({ error: `Failed to delete task: ${error.message}` });
+    }
+    res.json({ message: "Task deleted successfully" });
+  } catch (err) {
+    console.error("[DEBUG] Error in task delete:", err);
+    res.status(500).json({ error: "Internal server error" });
   }
 });
 
@@ -1402,6 +1571,29 @@ app.use((err: any, req: express.Request, res: express.Response, next: express.Ne
     return res.redirect('http://localhost:3000/login?error=GoogleAuthFailed');
   }
   res.status(500).json({ error: "Internal Server Error" });
+});
+
+app.post("/api/ai/summary", async (req, res) => {
+  // DEBUG: Check what the user role is
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.split(" ")[1];
+  
+  if (token === "test") {
+    // Bypass for testing
+    console.log("DEBUG: Using test bypass");
+  } else {
+    // Real auth check logic
+  }
+
+  try {
+    const { context } = req.body;
+    const model = genAI.getGenerativeModel({ model: "gemini-1.5-flash" });
+    const result = await model.generateContent(`Summarize: ${context}`);
+    res.json({ summary: result.response.text() });
+  } catch (error) {
+    console.error(error);
+    res.status(500).json({ error: "Failed to generate summary" });
+  }
 });
 
 app.listen(PORT, () => {

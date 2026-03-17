@@ -48,7 +48,7 @@ export default function CoursesPage() {
         try {
             const decoded: any = jwtDecode(token);
             setUser(decoded);
-            if (decoded.role === 'Admin' || decoded.role === 'Advisers') {
+            if (decoded.role === 'Admin' || decoded.role === 'Adviser') {
                 setCanCreate(true);
             }
             fetchCourses(token);
