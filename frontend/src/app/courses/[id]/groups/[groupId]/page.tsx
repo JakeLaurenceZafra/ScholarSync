@@ -3,21 +3,20 @@
 import { useEffect, useState } from 'react';
 import { useParams, useRouter } from 'next/navigation';
 import SidebarLayout from '@/components/SidebarLayout';
+import AIResultModal from '@/components/AIResultModal';
+import { useAIStore } from '@/store/ai.store';
 import axios from 'axios';
 import { jwtDecode } from 'jwt-decode';
+import { Sparkles, TrendingUp } from 'lucide-react';
 
 type Group = {
-    groupID?: number;
-    smallgroupID?: number; 
+    smallgroupID: number;
     groupName: string;
-    team_number?: number;
-    proposed_project?: string;
-    adviser?: string;
-    member1: string | null; roleOne: string | null; nameOne?: string | null;
-    member2: string | null; roleTwo: string | null; nameTwo?: string | null;
-    member3: string | null; roleThree: string | null; nameThree?: string | null;
-    member4: string | null; roleFour: string | null; nameFour?: string | null;
-    member5: string | null; roleFive: string | null; nameFive?: string | null;
+    member1: string | null; roleOne: string | null;
+    member2: string | null; roleTwo: string | null;
+    member3: string | null; roleThree: string | null;
+    member4: string | null; roleFour: string | null;
+    member5: string | null; roleFive: string | null;
 };
 
 type Task = {
@@ -42,9 +41,17 @@ export default function GroupPage() {
     const [journals, setJournals] = useState<any[]>([]);
     const [activeTab, setActiveTab] = useState<'tasks' | 'journals'>('tasks');
     const [selectedJournal, setSelectedJournal] = useState<any | null>(null);
+    const { generate } = useAIStore();
+    const [showAIModal, setShowAIModal] = useState(false);
     
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState('');
+
+    // Journal Details Loading State
+    const [journalAttendance, setJournalAttendance] = useState<Record<string, string>>({});
+    const [journalParticipation, setJournalParticipation] = useState<Record<string, string>>({});
+    const [fetchingJournalDetails, setFetchingJournalDetails] = useState(false);
+    const [exportingDocs, setExportingDocs] = useState(false);
 
     // Task Creation Modal State
     const [showTaskModal, setShowTaskModal] = useState(false);
@@ -56,6 +63,7 @@ export default function GroupPage() {
 
     const fetchGroupData = async (token: string) => {
         try {
+            console.log("DEBUG: fetchGroupData for groupId:", groupId);
             const groupRes = await axios.get(`http://localhost:5000/api/groups/${groupId}`, { headers: { Authorization: `Bearer ${token}` } });
             setGroup(groupRes.data);
 
@@ -64,7 +72,11 @@ export default function GroupPage() {
 
             const consRes = await axios.get(`http://localhost:5000/api/courses/${courseId}/consultations`, { headers: { Authorization: `Bearer ${token}` } });
             // Filter down to published consultations associated specifically with this exact group Name
-            const groupJournals = consRes.data.filter((c: any) => c.groupName === groupRes.data.groupName && !c.isDraft);
+            // Using robust comparison (trim and lowercase)
+            const currentGroupName = groupRes.data.groupName?.trim().toLowerCase();
+            const groupJournals = (consRes.data || []).filter((c: any) => 
+                c.groupName?.trim().toLowerCase() === currentGroupName && !c.isDraft
+            );
             setJournals(groupJournals);
         } catch (err: any) {
             console.error("Fetch Group Error:", err);
@@ -91,6 +103,57 @@ export default function GroupPage() {
 
         fetchGroupData(token);
     }, [groupId, router]);
+
+    useEffect(() => {
+        const fetchDetails = async () => {
+            if (!selectedJournal) {
+                setJournalAttendance({});
+                setJournalParticipation({});
+                return;
+            }
+
+            try {
+                setFetchingJournalDetails(true);
+                const token = localStorage.getItem('auth_token');
+                if (!token) return;
+
+                const [attRes, partRes] = await Promise.all([
+                    axios.get(`http://localhost:5000/api/consultations/${selectedJournal.conID}/attendance`, { headers: { Authorization: `Bearer ${token}` } }),
+                    axios.get(`http://localhost:5000/api/consultations/${selectedJournal.conID}/participation`, { headers: { Authorization: `Bearer ${token}` } })
+                ]);
+
+                setJournalAttendance(attRes.data || {});
+                setJournalParticipation(partRes.data || {});
+            } catch (err) {
+                console.error("Error fetching journal details:", err);
+            } finally {
+                setFetchingJournalDetails(false);
+            }
+        };
+
+        fetchDetails();
+    }, [selectedJournal]);
+
+    const handleExportDocs = async () => {
+        if (!selectedJournal) return;
+        
+        try {
+            setExportingDocs(true);
+            const token = localStorage.getItem('auth_token');
+            const res = await axios.post(`http://localhost:5000/api/consultations/${selectedJournal.conID}/export-docs`, {}, {
+                headers: { Authorization: `Bearer ${token}` }
+            });
+
+            if (res.data.url) {
+                window.open(res.data.url, '_blank');
+            }
+        } catch (err: any) {
+            console.error("Export error:", err);
+            alert(err.response?.data?.error || "Failed to export to Google Docs. Make sure the advisor has linked their Google account.");
+        } finally {
+            setExportingDocs(false);
+        }
+    };
 
     const handleCreateTask = async () => {
         if (!taskTitle || !taskAssign || !taskDeadline) {
@@ -120,6 +183,24 @@ export default function GroupPage() {
         }
     };
 
+    const handleAIGenerate = async (type: 'summary' | 'participation') => {
+        if (!group) return;
+        setShowAIModal(true);
+        if (type === 'summary') {
+            const context = journals.map(j => j.conSum).join('\n\n');
+            await generate('summary', { context });
+        } else {
+            // Pick latest consultation ID for participation if available
+            const conID = journals[0]?.conID;
+            if (!conID) {
+                alert("No consultation records found to analyze participation.");
+                setShowAIModal(false);
+                return;
+            }
+            await generate('participation', { conID });
+        }
+    };
+
     if (loading) return <div className="min-h-screen bg-white"></div>;
 
     if (error || !group) {
@@ -135,11 +216,11 @@ export default function GroupPage() {
 
     // Determine memberships
     const membersList = [
-        { email: group.member1, role: group.roleOne, name: group.nameOne },
-        { email: group.member2, role: group.roleTwo, name: group.nameTwo },
-        { email: group.member3, role: group.roleThree, name: group.nameThree },
-        { email: group.member4, role: group.roleFour, name: group.nameFour },
-        { email: group.member5, role: group.roleFive, name: group.nameFive },
+        { email: group.member1, role: group.roleOne },
+        { email: group.member2, role: group.roleTwo },
+        { email: group.member3, role: group.roleThree },
+        { email: group.member4, role: group.roleFour },
+        { email: group.member5, role: group.roleFive },
     ].filter(m => m.email); // Filter out empty slots
 
     const isLeader = membersList.some(m => m.email === user?.email && m.role === 'leader');
@@ -152,215 +233,128 @@ export default function GroupPage() {
                 <main className="flex-1 p-8 max-w-7xl mx-auto w-full">
                     
                     {/* Header */}
-                    <div className="mb-6 flex flex-col justify-start">
-                        <button 
-                            onClick={() => router.push(`/courses/${courseId}`)}
-                            className="text-gray-500 text-sm font-semibold hover:text-indigo-600 mb-4 flex items-center gap-1 w-fit"
-                        >
-                            ← Back to Course
-                        </button>
-                        <div className="flex items-center gap-3 mb-2">
-                             <div className="text-[13px] font-bold text-indigo-500 uppercase tracking-widest">
-                                TEAM {String(group.team_number || group.groupName.replace('Group ', '')).padStart(2, '0')}
-                             </div>
-                             <div className="flex items-center gap-2 text-[13px] font-bold text-slate-400">
-                                 <span>•</span>
-                                 <span>{courseId.toUpperCase()}</span>
-                             </div>
+                    <div className="mb-8 flex items-center justify-between">
+                        <div>
+                            <button 
+                                onClick={() => router.push(`/courses/${courseId}`)}
+                                className="text-gray-500 text-sm font-semibold hover:text-indigo-600 mb-2 flex items-center gap-1"
+                            >
+                                ← Back to Course
+                            </button>
+                            <h1 className="text-3xl font-bold text-gray-900">{group.groupName}</h1>
                         </div>
-                        <h1 className="text-2xl font-bold text-slate-800 tracking-tight leading-snug">
-                            {group.proposed_project || group.groupName}
-                        </h1>
-                        <p className="text-sm text-slate-500 mt-2 font-medium">
-                            {group.groupName} • {courseId.toUpperCase()}
-                        </p>
+
+                        {/* AI Action Buttons */}
+                        <div className="flex gap-3">
+                            <button 
+                                onClick={() => handleAIGenerate('summary')}
+                                className="flex items-center gap-2 px-4 py-2 bg-blue-50 text-blue-600 rounded-lg font-bold text-xs uppercase tracking-wider hover:bg-blue-100 transition-all border border-blue-100"
+                            >
+                                <Sparkles className="w-4 h-4" />
+                                AI Summary
+                            </button>
+                            <button 
+                                onClick={() => handleAIGenerate('participation')}
+                                className="flex items-center gap-2 px-4 py-2 bg-purple-50 text-purple-600 rounded-lg font-bold text-xs uppercase tracking-wider hover:bg-purple-100 transition-all border border-purple-100"
+                            >
+                                <TrendingUp className="w-4 h-4" />
+                                AI Insights
+                            </button>
+                        </div>
                     </div>
 
-                    <div className="grid grid-cols-1 lg:grid-cols-12 gap-8 mt-8">
+                    <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
                         
-                        {/* Left Container: Team Info & Members */}
-                        <div className="lg:col-span-4 flex flex-col gap-6">
-                            
-                            {/* Team Info */}
-                            <div>
-                                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Team Info</h2>
-                                <div className="flex items-start gap-4 mb-4">
-                                     <div className="mt-1">
-                                          <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5 text-amber-500" viewBox="0 0 20 20" fill="currentColor">
-                                              <path fillRule="evenodd" d="M6 2a1 1 0 00-1 1v1H4a2 2 0 00-2 2v10a2 2 0 002 2h12a2 2 0 002-2V6a2 2 0 00-2-2h-1V3a1 1 0 10-2 0v1H7V3a1 1 0 00-1-1zm0 5a1 1 0 000 2h8a1 1 0 100-2H6z" clipRule="evenodd" />
-                                          </svg>
-                                     </div>
-                                     <div>
-                                         <div className="text-xs text-slate-500 font-medium">Adviser</div>
-                                         <div className="text-sm font-bold text-slate-800">{group.adviser || 'TBI'}</div>
-                                     </div>
-                                </div>
-                                <div className="text-[13px] text-slate-500 font-medium mb-8">
-                                    {courseId.toUpperCase()}
-                                </div>
+                        {/* Left Container: Members */}
+                        <div className="lg:col-span-1 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col">
+                            <div className="bg-[#4FB6DF] p-4 border-b border-gray-100 flex justify-between items-center">
+                                <h2 className="font-bold text-white text-lg">Members ({membersList.length}/5)</h2>
                             </div>
-                            
-                            {/* Members */}
-                            <div>
-                                <div className="flex justify-between items-center mb-4">
-                                    <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider">Members ({membersList.length})</h2>
-                                    {isAdmin && (
-                                        <button className="text-xs font-bold text-indigo-500 bg-indigo-50 hover:bg-indigo-100 px-3 py-1 rounded-md transition-colors flex items-center gap-1">
-                                            + Add
-                                        </button>
-                                    )}
-                                </div>
+                            <div className="p-4 flex-1 overflow-y-auto w-full">
                                 {membersList.length > 0 ? (
                                     <div className="flex flex-col gap-3">
-                                        {membersList.map((member, idx) => {
-                                            const colors = ['bg-green-500', 'bg-blue-500', 'bg-purple-500', 'bg-pink-500', 'bg-amber-500'];
-                                            const bgColor = colors[idx % colors.length];
-                                            const initial = member.name ? member.name.charAt(0).toUpperCase() : (member.email ? member.email.charAt(0).toUpperCase() : '?');
-                                            
-                                            return (
-                                                <div key={idx} className="flex items-center justify-between p-4 rounded-xl border border-slate-200 bg-white shadow-sm hover:shadow-md transition-all group">
-                                                    <div className="flex items-center gap-3 overflow-hidden">
-                                                        <div className={`w-10 h-10 ${bgColor} text-white rounded-full flex items-center justify-center font-bold flex-shrink-0 text-lg`}>
-                                                            {initial}
-                                                        </div>
-                                                        <div className="flex flex-col truncate pr-2">
-                                                            <div className="flex items-center gap-2">
-                                                                <span className="font-bold text-sm text-slate-800 truncate">{member.name || member.email?.split('@')[0]}</span>
-                                                                {member.role === 'leader' && (
-                                                                    <span className="text-[9px] uppercase tracking-wider font-bold px-1.5 py-0.5 rounded bg-blue-50 text-blue-600">
-                                                                        Leader
-                                                                    </span>
-                                                                )}
-                                                            </div>
-                                                            <span className="text-xs text-slate-400 truncate">{member.email}</span>
-                                                        </div>
-                                                    </div>
-                                                    {isAdmin && (
-                                                        <button className="text-slate-300 hover:text-red-500 transition-colors opacity-0 group-hover:opacity-100 p-1">
-                                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 7l-.867 12.142A2 2 0 0116.138 21H7.862a2 2 0 01-1.995-1.858L5 7m5 4v6m4-6v6m1-10V4a1 1 0 00-1-1h-4a1 1 0 00-1 1v3M4 7h16" />
-                                                            </svg>
-                                                        </button>
-                                                    )}
+                                        {membersList.map((member, idx) => (
+                                            <div key={idx} className="flex items-center justify-between p-3 rounded-lg border border-gray-100 bg-gray-50/50">
+                                                <div className="flex flex-col truncate pr-2">
+                                                    <span className="font-semibold text-sm text-gray-800 truncate" title={member.email!}>{member.email}</span>
                                                 </div>
-                                            );
-                                        })}
+                                                <span className={`text-[10px] uppercase tracking-wider font-bold px-2 py-1 rounded-full ${member.role === 'leader' ? 'bg-amber-100 text-amber-700' : 'bg-blue-100 text-blue-700'}`}>
+                                                    {member.role}
+                                                </span>
+                                            </div>
+                                        ))}
                                     </div>
                                 ) : (
-                                    <p className="text-slate-500 italic text-sm bg-slate-50 p-4 rounded-xl border border-slate-200 text-center">No members assigned.</p>
+                                    <p className="text-gray-500 italic text-sm">No members configured.</p>
                                 )}
-                            </div>
-                            
-                            {/* Discussion Stub */}
-                            <div className="mt-4">
-                                <h2 className="text-xs font-bold text-slate-400 uppercase tracking-wider mb-4">Discussion</h2>
-                                <div className="bg-slate-50 border border-slate-200 rounded-xl p-8 text-center flex flex-col items-center justify-center min-h-[150px]">
-                                    <p className="text-sm font-medium text-slate-400 mb-4">No comments yet</p>
-                                </div>
-                                <div className="mt-3 relative">
-                                    <input 
-                                        type="text" 
-                                        placeholder="Write a comment..." 
-                                        className="w-full bg-white border border-slate-200 rounded-xl py-3 pl-4 pr-12 text-sm focus:outline-none focus:border-blue-400 focus:ring-1 focus:ring-blue-400 transition-all shadow-sm"
-                                    />
-                                    <button className="absolute right-2 top-1/2 transform -translate-y-1/2 bg-blue-500 hover:bg-blue-600 text-white p-1.5 rounded-lg transition-colors">
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" viewBox="0 0 20 20" fill="currentColor">
-                                            <path d="M10.894 2.553a1 1 0 00-1.788 0l-7 14a1 1 0 001.169 1.409l5-1.429A1 1 0 009 15.571V11a1 1 0 112 0v4.571a1 1 0 00.725.962l5 1.428a1 1 0 001.17-1.408l-7-14z" />
-                                        </svg>
-                                    </button>
-                                </div>
                             </div>
                         </div>
 
-                        {/* Right Container: Activity & Data */}
-                        <div className="lg:col-span-8 flex flex-col gap-6 lg:border-l lg:border-slate-200 lg:pl-8">
+                        {/* Right Container: Tasks & Journals */}
+                        <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col min-h-[400px]">
                             
-                            <div className="flex justify-between items-center border-b border-slate-200 pb-px">
-                                <div className="flex items-center gap-6">
+                            <div className="bg-[#0095FF] flex justify-between items-center px-4 w-full">
+                                <div className="flex items-center pt-2">
                                     <button 
                                         onClick={() => setActiveTab('tasks')}
-                                        className={`pb-3 text-[13px] font-bold tracking-wide relative transition-colors ${activeTab === 'tasks' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}
+                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'tasks' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
                                     >
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block mr-1.5 align-text-bottom" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
-                                        </svg>
-                                        Progress & Tasks
-                                        {activeTab === 'tasks' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-blue-600 rounded-t-full"></div>}
+                                        Group Tasks
                                     </button>
                                     <button 
                                         onClick={() => setActiveTab('journals')}
-                                        className={`pb-3 text-[13px] font-bold tracking-wide relative transition-colors ${activeTab === 'journals' ? 'text-blue-600' : 'text-slate-500 hover:text-slate-800'}`}
+                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'journals' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
                                     >
-                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4 inline-block mr-1.5 align-text-bottom" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                                        </svg>
                                         Journals
-                                        {activeTab === 'journals' && <div className="absolute bottom-0 left-0 right-0 h-[2px] bg-blue-600 rounded-t-full"></div>}
                                     </button>
                                 </div>
                                 {activeTab === 'tasks' && canCreateTasks && (
                                     <button 
                                         onClick={() => setShowTaskModal(true)}
-                                        className="text-emerald-600 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-4 py-1.5 rounded-lg text-[13px] font-bold transition-colors mb-2 flex items-center gap-1.5"
+                                        className="bg-white text-[#0095FF] px-4 py-1.5 rounded text-sm font-bold shadow hover:bg-gray-50 transition-colors my-2"
                                     >
-                                        <span>+ Add Task</span>
+                                        + Add Task
                                     </button>
+                                )}
+                                {activeTab === 'journals' && (
+                                    <div className="flex items-center gap-2 text-white/90 text-[10px] font-black uppercase tracking-widest bg-white/10 px-3 py-1.5 rounded-full border border-white/20">
+                                        <div className="w-1.5 h-1.5 bg-green-400 rounded-full animate-pulse"></div>
+                                        {journals.length} Published
+                                    </div>
                                 )}
                             </div>
 
-                            <div className="flex-1 w-full pb-10">
+                            <div className="p-6 flex-1 overflow-y-auto w-full max-h-[600px]">
                                 {activeTab === 'tasks' && (
-                                    <>
-                                        {/* Abstracted Progress View (Placeholder matching screenshot) */}
-                                        <div className="border border-slate-200 rounded-xl p-8 flex flex-col items-center justify-center bg-white shadow-sm mb-6">
-                                            <h3 className="text-sm font-bold text-slate-500 mb-6">Team Progress</h3>
-                                            
-                                            <div className="w-32 h-32 rounded-full border-[6px] border-slate-100 border-t-red-500 flex items-center justify-center relative shadow-inner mb-6">
-                                                <div className="absolute top-1 left-1/2 transform -translate-x-1/2 -translate-y-1/2 w-3 h-3 bg-red-500 rounded-full border-2 border-white"></div>
-                                                <span className="text-3xl font-black text-red-500">0%</span>
-                                            </div>
-
-                                            <div className="flex justify-center gap-10">
-                                                <div className="text-center">
-                                                    <div className="text-xl font-bold text-green-500">0</div>
-                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">Done</div>
+                                    tasks.length > 0 ? (
+                                        <div className="grid gap-4">
+                                            {tasks.map(task => (
+                                                <div key={task.taskID} className="border border-gray-200 rounded-lg p-4 hover:shadow-md transition-shadow relative overflow-hidden group">
+                                                    <div className="absolute left-0 top-0 bottom-0 w-1 bg-[#0095FF]"></div>
+                                                    <div className="flex justify-between items-start mb-2">
+                                                        <h3 className="font-bold text-lg text-gray-800 break-words max-w-[70%]">{task.taskTitle}</h3>
+                                                        <div className="text-xs font-semibold px-2 py-1 bg-red-50 text-red-600 rounded whitespace-nowrap">
+                                                            Due: {task.taskDeadline || 'No date'}
+                                                        </div>
+                                                    </div>
+                                                    {task.taskInfo && (
+                                                        <p className="text-gray-600 text-sm mb-4 line-clamp-3">{task.taskInfo}</p>
+                                                    )}
+                                                    <div className="flex items-center gap-2 mt-auto">
+                                                        <span className="text-xs font-medium text-gray-500">Assigned to:</span>
+                                                        <span className="text-xs font-bold text-[#0095FF] bg-blue-50 px-2 py-1 rounded-full">{task.taskAssign}</span>
+                                                    </div>
                                                 </div>
-                                                <div className="text-center">
-                                                    <div className="text-xl font-bold text-amber-500">0</div>
-                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">In Progress</div>
-                                                </div>
-                                                <div className="text-center">
-                                                    <div className="text-xl font-bold text-slate-400">0</div>
-                                                    <div className="text-[11px] font-bold text-slate-400 uppercase tracking-widest mt-1">Pending</div>
-                                                </div>
-                                            </div>
+                                            ))}
                                         </div>
-
-                                        {/* Actual Tasks mapping below progress */}
-                                        {tasks.length > 0 ? (
-                                             <div className="grid gap-4">
-                                                 {tasks.map(task => (
-                                                     <div key={task.taskID} className="border border-gray-200 rounded-xl p-5 hover:shadow-md transition-shadow relative overflow-hidden group bg-white">
-                                                         <div className="flex justify-between items-start mb-2">
-                                                             <h3 className="font-bold text-base text-gray-800 break-words max-w-[70%]">{task.taskTitle}</h3>
-                                                             <div className="text-xs font-semibold px-2 py-1 bg-slate-100 text-slate-600 rounded whitespace-nowrap">
-                                                                 Due: {task.taskDeadline || 'No date'}
-                                                             </div>
-                                                         </div>
-                                                         {task.taskInfo && (
-                                                             <p className="text-gray-500 text-sm mb-4 line-clamp-3">{task.taskInfo}</p>
-                                                         )}
-                                                         <div className="flex items-center gap-2 mt-auto">
-                                                             <div className="w-6 h-6 bg-indigo-100 text-indigo-600 rounded-full flex items-center justify-center text-[10px] font-bold">
-                                                                {task.taskAssign.charAt(0).toUpperCase()}
-                                                             </div>
-                                                             <span className="text-xs font-bold text-slate-600">{task.taskAssign}</span>
-                                                         </div>
-                                                     </div>
-                                                 ))}
-                                             </div>
-                                        ) : null}
-                                    </>
+                                    ) : (
+                                        <div className="h-full flex flex-col items-center justify-center text-gray-400 py-12">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                            </svg>
+                                            <p>No tasks created yet.</p>
+                                        </div>
+                                    )
                                 )}
 
                                 {activeTab === 'journals' && (
@@ -388,17 +382,20 @@ export default function GroupPage() {
                                                         </div>
                                                     </div>
                                                     
-                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Discussion Summary</h4>
-                                                    <p className="text-sm text-gray-700 whitespace-pre-wrap">{journal.conSum || <span className="italic text-gray-400 text-xs">No summary logged.</span>}</p>
+                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-1">Milestone Description</h4>
+                                                    <p className="text-sm text-gray-700 whitespace-pre-wrap">{journal.conSum || <span className="italic text-gray-400 text-xs">No description logged.</span>}</p>
                                                 </div>
                                             ))}
                                         </div>
                                     ) : (
                                         <div className="h-full flex flex-col items-center justify-center text-gray-400 py-12">
-                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
-                                            </svg>
-                                            <p>No journals published yet.</p>
+                                            <div className="w-16 h-16 bg-gray-50 rounded-full flex items-center justify-center mb-4 border border-gray-100">
+                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-8 w-8 opacity-40" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M12 6.253v13m0-13C10.832 5.477 9.246 5 7.5 5S4.168 5.477 3 6.253v13C4.168 18.477 5.754 18 7.5 18s3.332.477 4.5 1.253m0-13C13.168 5.477 14.754 5 16.5 5c1.747 0 3.332.477 4.5 1.253v13C19.832 18.477 18.247 18 16.5 18c-1.746 0-3.332.477-4.5 1.253" />
+                                                </svg>
+                                            </div>
+                                            <p className="font-medium">No journals published for this group.</p>
+                                            <p className="text-xs text-center max-w-[200px] mt-2">Publish consultations from the Adviser dashboard to see them here.</p>
                                         </div>
                                     )
                                 )}
@@ -486,64 +483,147 @@ export default function GroupPage() {
                     {/* Journal Details Modal */}
                     {selectedJournal && (
                         <div className="absolute inset-0 z-50 flex items-center justify-center bg-black/40 backdrop-blur-sm fixed p-4">
-                            <div className="bg-white w-full max-w-2xl rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
+                            <div className="bg-white w-full max-w-3xl rounded-xl shadow-2xl overflow-hidden animate-in fade-in zoom-in-95 duration-200 flex flex-col max-h-[90vh]">
                                 <div className="bg-[#0095FF] px-6 py-4 flex justify-between items-center shrink-0">
-                                    <h2 className="text-lg font-bold text-white">Journal Details</h2>
+                                    <div className="flex items-center gap-4">
+                                        <h2 className="text-lg font-bold text-white">Journal Details</h2>
+                                        {(user?.role === 'Admin' || user?.role === 'Advisers') && (
+                                            <button 
+                                                onClick={handleExportDocs}
+                                                disabled={exportingDocs}
+                                                className="bg-white/20 hover:bg-white/30 disabled:opacity-50 text-white text-[10px] font-black uppercase tracking-widest px-4 py-1.5 rounded-full transition-all flex items-center gap-2 border border-white/20 shadow-sm"
+                                            >
+                                                {exportingDocs ? (
+                                                    <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
+                                                ) : (
+                                                    <svg xmlns="http://www.w3.org/2000/svg" className="h-3 w-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                        <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={3} d="M12 10v6m0 0l-3-3m3 3l3-3m2 8H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z" />
+                                                    </svg>
+                                                )}
+                                                {exportingDocs ? 'Generating...' : 'Get DOCs Copy'}
+                                            </button>
+                                        )}
+                                    </div>
                                     <button onClick={() => setSelectedJournal(null)} className="text-white/80 hover:text-white transition-colors text-xl leading-none">&times;</button>
                                 </div>
-                                <div className="p-6 overflow-y-auto flex flex-col gap-6 custom-scrollbar">
-                                    <div className="flex justify-between items-start border-b border-gray-200 pb-4">
-                                        <div>
-                                            <h3 className="text-2xl font-bold text-gray-900">{selectedJournal.conMil}</h3>
-                                            <div className="flex gap-2 mt-2">
-                                                <span className="text-xs font-bold text-[#0095FF] bg-blue-50 px-3 py-1 rounded-full">{selectedJournal.conStat}</span>
-                                                <span className="text-xs font-bold text-gray-600 bg-gray-100 px-3 py-1 rounded-full">{selectedJournal.conType}</span>
-                                            </div>
-                                        </div>
-                                        <div className="text-right">
-                                            <span className="text-sm font-semibold text-gray-500 flex items-center gap-1 justify-end">
-                                                <svg xmlns="http://www.w3.org/2000/svg" className="h-4 w-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                                                    <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
-                                                </svg>
-                                                {selectedJournal.conDate}
-                                            </span>
-                                        </div>
-                                    </div>
-
-                                    <div>
-                                        <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Discussion Summary</h4>
-                                        <p className="text-sm text-gray-700 whitespace-pre-wrap bg-gray-50 p-4 rounded-lg border border-gray-100">
-                                            {selectedJournal.conSum || <span className="italic text-gray-400">No summary.</span>}
-                                        </p>
-                                    </div>
-
-                                    {selectedJournal.conAction && (
-                                        <div>
-                                            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Assigned Action Items</h4>
-                                            <pre className="text-sm text-gray-700 whitespace-pre-wrap font-sans bg-gray-50 p-4 rounded-lg border border-gray-100">
-                                                {selectedJournal.conAction}
-                                            </pre>
-                                        </div>
-                                    )}
-
-                                    {selectedJournal.conAtt && (
-                                        <div>
-                                            <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attendees</h4>
+                                <div className="p-8 overflow-y-auto flex flex-col gap-8 custom-scrollbar">
+                                    {/* Top Section: Header Info */}
+                                    <div className="flex flex-col md:flex-row justify-between items-start md:items-center gap-4 border-b border-gray-100 pb-6">
+                                        <div className="flex-1">
+                                            <h3 className="text-3xl font-black text-gray-900 leading-tight mb-2 uppercase tracking-tight">{selectedJournal.conMil}</h3>
                                             <div className="flex flex-wrap gap-2">
-                                                {selectedJournal.conAtt.split(',').map((a: string) => a.trim()).filter(Boolean).map((att: string, i: number) => (
-                                                    <span key={i} className="px-3 py-1 bg-white border border-gray-200 rounded-full text-sm font-medium text-gray-700 shadow-sm flex items-center gap-2">
-                                                        <div className="w-5 h-5 rounded-full bg-gray-200 flex-shrink-0"></div>
-                                                        {att}
-                                                    </span>
-                                                ))}
+                                                <span className={`text-[10px] uppercase font-black px-3 py-1 rounded-full border shadow-sm ${
+                                                    selectedJournal.conStat === 'On Track' ? 'bg-green-50 text-green-700 border-green-200' :
+                                                    selectedJournal.conStat === 'Needs Revision' ? 'bg-yellow-50 text-yellow-700 border-yellow-200' :
+                                                    'bg-red-50 text-red-700 border-red-200'
+                                                }`}>
+                                                    {selectedJournal.conStat}
+                                                </span>
+                                                <span className="text-[10px] uppercase font-black px-3 py-1 bg-blue-50 text-blue-700 border border-blue-100 rounded-full shadow-sm">
+                                                    {selectedJournal.conType}
+                                                </span>
                                             </div>
                                         </div>
-                                    )}
+                                        <div className="flex items-center gap-2 text-gray-400 font-bold bg-gray-50 px-4 py-2 rounded-lg border border-gray-100 shadow-inner">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-5 w-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z" />
+                                            </svg>
+                                            <span className="text-sm tracking-widest">{selectedJournal.conDate}</span>
+                                        </div>
+                                    </div>
+
+                                    {/* Middle Section: Description */}
+                                    <div className="space-y-3">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Milestone Description</h4>
+                                        <div className="bg-slate-50/50 p-6 rounded-2xl border border-slate-100 shadow-sm">
+                                            <p className="text-gray-700 leading-relaxed text-sm whitespace-pre-wrap">
+                                                {selectedJournal.conSum || <span className="italic text-gray-400">No description provided.</span>}
+                                            </p>
+                                        </div>
+                                    </div>
+
+                                    {/* Attendees Table */}
+                                    <div className="space-y-3">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Attendance & Participation</h4>
+                                        <div className="overflow-hidden border border-gray-100 rounded-xl shadow-sm">
+                                            <table className="w-full text-left border-collapse">
+                                                <thead className="bg-[#4FB6DF]/10 border-b border-gray-100">
+                                                    <tr>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider">Member Name</th>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider text-right">Attendance</th>
+                                                        <th className="px-6 py-3 text-[10px] font-black text-[#4FB6DF] uppercase tracking-wider text-right">Participation Rating</th>
+                                                    </tr>
+                                                </thead>
+                                                <tbody className="divide-y divide-gray-50">
+                                                    {fetchingJournalDetails ? (
+                                                        <tr>
+                                                            <td colSpan={3} className="px-6 py-8 text-center text-gray-400 italic text-sm">
+                                                                <div className="flex items-center justify-center gap-2">
+                                                                    <div className="w-4 h-4 border-2 border-[#4FB6DF] border-t-transparent rounded-full animate-spin"></div>
+                                                                    Loading records...
+                                                                </div>
+                                                            </td>
+                                                        </tr>
+                                                    ) : selectedJournal.conAtt ? (
+                                                        selectedJournal.conAtt.split(',').map((name: string) => name.trim()).filter(Boolean).map((attendee: string, i: number) => {
+                                                            const status = journalAttendance[attendee] || 'Absent';
+                                                            const rating = journalParticipation[attendee] || 'None';
+                                                            return (
+                                                                <tr key={i} className="hover:bg-gray-50/50 transition-colors">
+                                                                    <td className="px-6 py-4">
+                                                                        <div className="flex items-center gap-3">
+                                                                            <div className="w-8 h-8 rounded-full bg-[#0095FF]/10 flex items-center justify-center text-[#0095FF] font-black text-xs border border-[#0095FF]/20 shadow-sm">
+                                                                                {attendee.charAt(0)}
+                                                                            </div>
+                                                                            <span className="text-sm font-bold text-gray-800">{attendee}</span>
+                                                                        </div>
+                                                                    </td>
+                                                                    <td className="px-6 py-4 text-right">
+                                                                        <span className={`text-[10px] font-black px-3 py-1 rounded-full shadow-sm border ${
+                                                                            status === 'Present' ? 'bg-green-100 text-green-700 border-green-200' : 'bg-red-100 text-red-700 border-red-200'
+                                                                        }`}>
+                                                                            {status}
+                                                                        </span>
+                                                                    </td>
+                                                                    <td className="px-6 py-4 text-right">
+                                                                        <span className={`text-[10px] font-black px-3 py-1 rounded-full shadow-sm border ${
+                                                                            rating === 'High' ? 'bg-blue-100 text-blue-700 border-blue-200' :
+                                                                            rating === 'Moderate' ? 'bg-amber-100 text-amber-700 border-amber-200' :
+                                                                            rating === 'Low' ? 'bg-gray-100 text-gray-700 border-gray-200' :
+                                                                            'bg-slate-50 text-slate-400 border-slate-100 italic'
+                                                                        }`}>
+                                                                            {rating}
+                                                                        </span>
+                                                                    </td>
+                                                                </tr>
+                                                            );
+                                                        })
+                                                    ) : (
+                                                        <tr>
+                                                            <td colSpan={3} className="px-6 py-8 text-center text-gray-400 italic text-sm">No attendees logged.</td>
+                                                        </tr>
+                                                    )}
+                                                </tbody>
+                                            </table>
+                                        </div>
+                                    </div>
+
+                                    {/* Bottom Section: Internal Notes */}
+                                    <div className="space-y-3 pt-4 border-t border-gray-100">
+                                        <h4 className="text-[11px] font-black text-gray-400 uppercase tracking-[0.2em]">Adviser&apos;s Notes</h4>
+                                        <div className="bg-[#4FB6DF]/5 p-6 rounded-2xl border border-[#4FB6DF]/10 shadow-sm relative overflow-hidden group">
+                                            <div className="absolute left-0 top-0 bottom-0 w-1.5 bg-[#4FB6DF] opacity-50 group-hover:opacity-100 transition-opacity"></div>
+                                            <p className="text-gray-700 italic text-sm leading-relaxed pl-2 whitespace-pre-wrap">
+                                                {selectedJournal.conNotes || "No internal notes provided for this consultation."}
+                                            </p>
+                                        </div>
+                                    </div>
                                 </div>
                             </div>
                         </div>
                     )}
-
+                {/* AI Result Modal */}
+                {showAIModal && <AIResultModal onClose={() => setShowAIModal(false)} />}
                 </main>
             </div>
         </SidebarLayout>

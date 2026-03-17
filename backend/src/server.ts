@@ -8,19 +8,10 @@ import pg from 'pg';
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 import { google } from 'googleapis';
-
-const { Pool } = pg;
-
-// Use SkyFlow's PostgreSQL database — explicit params because pg URL parser
-// cannot handle dotted Supabase usernames (postgres.projectref)
-const pool = new Pool({
-  host: process.env.DB_HOST || 'aws-1-ap-southeast-2.pooler.supabase.com',
-  port: parseInt(process.env.DB_PORT || '6543'),
-  database: process.env.DB_NAME || 'postgres',
-  user: process.env.DB_USER || 'postgres.fijnckhquezxpflfzcyk',
-  password: process.env.DB_PASSWORD || 'ZroqnJyydPs6RkQy',
-  ssl: process.env.DB_SSL === 'false' ? false : { rejectUnauthorized: false }
-});
+import aiRoutes from './routes/ai.routes.js';
+import { GoogleDocsService } from './googleDocsService.js';
+import { authenticate, authorizeRole } from './middleware/auth.js';
+import { pool } from './db.js';
 
 const app = express();
 
@@ -29,6 +20,9 @@ app.use(cors({
   credentials: true
 }));
 app.use(express.json());
+
+// Register ported ScholarSyncV3 routes
+app.use('/api/ai', aiRoutes);
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID!,
@@ -261,7 +255,7 @@ app.get('/api/courses/:id/members', async (req, res) => {
     );
 
     // Map account_id back to id for the frontend
-    const formatted = actRes.rows.map(r => ({ ...r, account_id: r.id }));
+    const formatted = actRes.rows.map(r => ({ ...r, id: r.id, account_id: r.id }));
     return res.json(formatted);
   } catch (err) {
     return res.sendStatus(403);
@@ -344,26 +338,73 @@ app.get('/api/courses/:id/consultations', async (req, res) => {
 
   try {
     jwt.verify(token, process.env.JWT_SECRET || 'test');
-    // Check if ss_consultations table exists first
-    const tableCheck = await pool.query(
-      `SELECT to_regclass('public.ss_consultations') as tbl`
-    );
-    if (!tableCheck.rows[0].tbl) {
-      return res.json([]); // Table not yet created — return empty
-    }
+    
     const { rows } = await pool.query(
-      `SELECT id as "conID", course_id as "courseID", group_name as "groupName",
-              con_date as "conDate", con_type as "conType", con_mil as "conMil",
-              con_sum as "conSum", con_action as "conAction", con_att as "conAtt",
-              is_draft as "isDraft", con_stat as "conStat"
-       FROM ss_consultations
-       WHERE course_id = $1
-       ORDER BY con_date DESC`,
+      `SELECT "conID", "courseID", "groupName", "conDate", "conType", "conMil",
+              "conSum", "conAction", "conAtt", "isDraft", "conStat", "conNotes"
+       FROM ss_consultation
+       WHERE "courseID" = $1
+       ORDER BY "conDate" DESC`,
       [req.params.id]
     );
     return res.json(rows);
   } catch (err) {
     return res.json([]); // Graceful fallback
+  }
+});
+
+app.post('/api/consultations', authenticate, authorizeRole(['Adviser', 'Admin', 'Student']), async (req, res) => {
+  const { courseID, groupName, conDate, conType, conMil, conSum, conAction, conAtt, isDraft, conStat, conNotes } = req.body;
+  
+  try {
+    const { rows } = await pool.query(
+      `INSERT INTO ss_consultation ("courseID", "groupName", "conDate", "conType", "conMil", "conSum", "conAction", "conAtt", "isDraft", "conStat", "conNotes")
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
+      [courseID, groupName, conDate, conType, conMil, conSum, conAction, conAtt, isDraft, conStat, conNotes]
+    );
+    
+    const data = rows[0];
+    
+    // Archive to Google Docs if not a draft
+    if (data && !data.isDraft) {
+      try {
+        await GoogleDocsService.archiveConsultation(data, (req as any).user.email);
+      } catch (archiveError) {
+        console.error("Archive failed:", archiveError);
+      }
+    }
+    
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
+  }
+});
+
+app.put('/api/consultations/:id', authenticate, authorizeRole(['Adviser', 'Admin']), async (req, res) => {
+  const { conSum, conAction, conAtt, isDraft, conStat, conNotes } = req.body;
+  const conID = req.params.id;
+
+  try {
+    const { rows } = await pool.query(
+      `UPDATE ss_consultation 
+       SET "conSum" = $1, "conAction" = $2, "conAtt" = $3, "isDraft" = $4, "conStat" = $5, "conNotes" = $6 
+       WHERE "conID" = $7 RETURNING *`,
+      [conSum, conAction, conAtt, isDraft, conStat, conNotes, conID]
+    );
+    
+    const data = rows[0];
+
+    if (data && !data.isDraft) {
+      try {
+        await GoogleDocsService.archiveConsultation(data, (req as any).user.email);
+      } catch (archiveError) {
+        console.error("Archive failed:", archiveError);
+      }
+    }
+    
+    res.json(data);
+  } catch (err: any) {
+    res.status(500).json({ error: err.message });
   }
 });
 
@@ -450,6 +491,7 @@ app.get('/api/groups/:id', async (req, res) => {
 
     const groupData: any = {
       ...group,
+      id: group.groupID,
       member1: members[0]?.email || null,
       roleOne: members[0]?.is_leader ? 'leader' : (members[0] ? 'member' : null),
       nameOne: members[0]?.name || null,
@@ -940,8 +982,8 @@ app.post('/api/courses/:id/import-groups', async (req, res) => {
           { headers: { Authorization: `Bearer ${accessToken}` } }
         );
         const values: string[][] = dataRes.data.values || [];
-        if (values.length > 1) {
-          const headers = values[0].map((h: string) => h.trim());
+        if (values && values.length > 0) {
+          const headers = (values[0] || []).map((h: string) => h.trim());
           records = values.slice(1).map((row: string[]) => {
             const obj: any = {};
             headers.forEach((h, i) => { obj[h] = (row[i] || '').trim(); });
