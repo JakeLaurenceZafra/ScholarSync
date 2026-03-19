@@ -23,6 +23,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
     const [isMobileMenuOpen, setIsMobileMenuOpen] = useState(false);
     const [isAdmin, setIsAdmin] = useState(false);
+    const [userRole, setUserRole] = useState('');
     const [userEmail, setUserEmail] = useState('');
     const pathname = usePathname();
     const router = useRouter();
@@ -33,6 +34,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
             try {
                 const decoded: any = jwtDecode(token);
                 setIsAdmin(decoded.role === 'Admin');
+                setUserRole(decoded.role || '');
                 setUserEmail(decoded.email || '');
             } catch (e) {
                 console.error('Failed to decode token:', e);
@@ -50,6 +52,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         { href: '/courses', label: 'Courses', icon: FolderKanban },
         { href: '/calendar', label: 'Calendar', icon: Calendar },
         { href: '/workspace-sync', label: 'Workspace Sync', icon: RefreshCw },
+        ...(userRole === 'Adviser' || userRole === 'Admin' ? [{ href: '/schedule', label: 'My Schedule', icon: Calendar }] : []),
+        ...(userRole === 'Student' ? [{ href: '/booking', label: 'Booking', icon: Calendar }] : []),
     ];
 
     const isActive = (path: string) => pathname === path;

@@ -14,6 +14,7 @@ import { authenticate, authorizeRole } from './middleware/auth.js';
 import { pool } from './db.js';
 
 const app = express();
+const FRONTEND_URL = (process.env.FRONTEND_URL || 'http://localhost:3000').replace(/\/$/, '');
 
 app.use(cors({
   origin: ['http://localhost:3000', 'http://localhost:3002'],
@@ -76,7 +77,7 @@ app.get('/auth/google',
 );
 
 app.get('/auth/google/callback',
-  passport.authenticate('google', { session: false, failureRedirect: 'http://localhost:3000/login' }),
+  passport.authenticate('google', { session: false, failureRedirect: `${FRONTEND_URL}/login` }),
   (req, res) => {
     const user = req.user as any;
 
@@ -86,7 +87,7 @@ app.get('/auth/google/callback',
         process.env.JWT_SECRET || "test",
         { expiresIn: '15m' }
       );
-      return res.redirect(`http://localhost:3000/complete-profile?token=${tempToken}`);
+      return res.redirect(`${FRONTEND_URL}/complete-profile?token=${tempToken}`);
     }
 
     const token = jwt.sign(
@@ -95,7 +96,7 @@ app.get('/auth/google/callback',
       { expiresIn: '24h' }
     );
 
-    res.redirect(`http://localhost:3002/auth-success?token=${token}`);
+    res.redirect(`${FRONTEND_URL}/auth-success?token=${token}`);
   }
 );
 
@@ -185,7 +186,7 @@ const verifyInstructor = (req: express.Request, res: express.Response, next: exp
 
   jwt.verify(token, process.env.JWT_SECRET || "test", (err: any, user: any) => {
     if (err) return res.sendStatus(403);
-    if (user.role !== 'Admin' && user.role !== 'Advisers') {
+    if (user.role !== 'Admin' && user.role !== 'Adviser') {
       return res.status(403).json({ error: "Instructor access required" });
     }
     (req as any).user = user;
@@ -204,8 +205,8 @@ app.get('/api/courses', async (req, res) => {
     const enrollRes = await pool.query('SELECT course_id FROM ss_enrollments WHERE account_id = $1', [user.id]);
     const enrolledCourseIds = enrollRes.rows.map(e => e.course_id);
 
-    if (user.role === 'Admin' || user.role === 'Advisers') {
-      // Admin/Advisers see ALL courses
+    if (user.role === 'Admin' || user.role === 'Adviser') {
+      // Admin/Adviser see ALL courses
       const { rows: allCourses } = await pool.query('SELECT * FROM ss_courses ORDER BY id DESC');
       return res.json(allCourses);
     }
@@ -234,6 +235,47 @@ app.get('/api/courses/:id', async (req, res) => {
     return res.json(rows[0]);
   } catch (err) {
     return res.sendStatus(403);
+  }
+});
+
+// Get groups for a specific course
+app.get('/api/courses/:id/groups', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    // Query groups from team_groups table
+    const { rows: groups } = await pool.query(
+      `SELECT id as id, name as group_name, team_number
+       FROM team_groups 
+       WHERE course_id = $1
+       ORDER BY team_number ASC NULLS LAST, name ASC`,
+      [req.params.id]
+    );
+    
+    console.log('Groups from team_groups table for course', req.params.id, ':', groups);
+    return res.json({ groups });
+  } catch (err) {
+    console.error('Error fetching groups:', err);
+    return res.status(500).json({ error: 'Failed to fetch groups', details: (err as any).message });
+  }
+});
+
+// Debug endpoint to see raw team_groups data
+app.get('/api/debug/groups', async (req, res) => {
+  try {
+    const { rows: allGroups } = await pool.query(
+      `SELECT id, name, course_id, team_number FROM team_groups ORDER BY name`
+    );
+    const { rows: counts } = await pool.query('SELECT COUNT(*) as count FROM team_groups');
+    return res.json({ 
+      totalCount: counts[0].count,
+      groups: allGroups 
+    });
+  } catch (err) {
+    return res.status(500).json({ error: (err as any).message });
   }
 });
 
@@ -354,19 +396,26 @@ app.get('/api/courses/:id/consultations', async (req, res) => {
 });
 
 app.post('/api/consultations', authenticate, authorizeRole(['Adviser', 'Admin', 'Student']), async (req, res) => {
-  const { courseID, groupName, conDate, conType, conMil, conSum, conAction, conAtt, isDraft, conStat, conNotes } = req.body;
+  const { courseID, groupName, conDate, conMil, conSum, conAction, conConcerns, isDraft, conNotes, conAtt } = req.body;
   
   try {
+    // Map to new consolidated columns
+    const status = isDraft ? 'DRAFT' : 'SUBMITTED';
+    const adviser_notes = conNotes || null;
+    const attendance_data = conAtt ? { legacy_conAtt: conAtt } : {};
+
     const { rows } = await pool.query(
-      `INSERT INTO ss_consultation ("courseID", "groupName", "conDate", "conType", "conMil", "conSum", "conAction", "conAtt", "isDraft", "conStat", "conNotes")
-       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11) RETURNING *`,
-      [courseID, groupName, conDate, conType, conMil, conSum, conAction, conAtt, isDraft, conStat, conNotes]
+      `INSERT INTO ss_consultation 
+       ("courseID", "groupName", "conDate", "conMil", "conSum", "conAction", "conConcerns", status, adviser_notes, attendance_data, created_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NOW(), NOW())
+       RETURNING *`,
+      [courseID, groupName, conDate, conMil, conSum, conAction, conConcerns || null, status, adviser_notes, JSON.stringify(attendance_data)]
     );
     
     const data = rows[0];
     
-    // Archive to Google Docs if not a draft
-    if (data && !data.isDraft) {
+    // Archive to Google Docs if not a draft (using new status column)
+    if (data && status === 'SUBMITTED') {
       try {
         await GoogleDocsService.archiveConsultation(data, (req as any).user.email);
       } catch (archiveError) {
@@ -381,20 +430,26 @@ app.post('/api/consultations', authenticate, authorizeRole(['Adviser', 'Admin', 
 });
 
 app.put('/api/consultations/:id', authenticate, authorizeRole(['Adviser', 'Admin']), async (req, res) => {
-  const { conSum, conAction, conAtt, isDraft, conStat, conNotes } = req.body;
+  const { conDate, conMil, conSum, conAction, conConcerns, isDraft, conNotes, conAtt } = req.body;
   const conID = req.params.id;
 
   try {
+    // Map to new consolidated columns
+    const status = isDraft ? 'DRAFT' : 'SUBMITTED';
+    const adviser_notes = conNotes || null;
+    const attendance_data = conAtt ? { legacy_conAtt: conAtt } : {};
+
     const { rows } = await pool.query(
       `UPDATE ss_consultation 
-       SET "conSum" = $1, "conAction" = $2, "conAtt" = $3, "isDraft" = $4, "conStat" = $5, "conNotes" = $6 
-       WHERE "conID" = $7 RETURNING *`,
-      [conSum, conAction, conAtt, isDraft, conStat, conNotes, conID]
+       SET "conDate" = $1, "conMil" = $2, "conSum" = $3, "conAction" = $4, "conConcerns" = $5, status = $6, adviser_notes = $7, attendance_data = $8, updated_at = NOW()
+       WHERE "conID" = $9
+       RETURNING *`,
+      [conDate, conMil, conSum, conAction, conConcerns || null, status, adviser_notes, JSON.stringify(attendance_data), conID]
     );
     
     const data = rows[0];
 
-    if (data && !data.isDraft) {
+    if (data && status === 'SUBMITTED') {
       try {
         await GoogleDocsService.archiveConsultation(data, (req as any).user.email);
       } catch (archiveError) {
@@ -518,6 +573,146 @@ app.get('/api/groups/:id', async (req, res) => {
 // ── GET group tasks (dummy endpoint to prevent 404 until implemented) ──
 app.get('/api/groups/:id/tasks', async (req, res) => {
   return res.json([]);
+});
+
+// ── GET member journals for a course group ──
+app.get('/api/member-journals/course/:courseId/group/:groupId', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'test');
+
+    const { courseId, groupId } = req.params;
+    const groupRes = await pool.query(
+      'SELECT name FROM team_groups WHERE id = $1 AND course_id = $2',
+      [groupId, Number(courseId)]
+    );
+
+    if (groupRes.rows.length === 0) {
+      return res.json({ journals: [] });
+    }
+
+    const groupName = groupRes.rows[0].name;
+
+    const { rows } = await pool.query(
+      `SELECT id, "courseID", "groupName", member_email, journal_date, task_updates, action_plans, issues,
+              minutes_date, minutes_adviser, minutes_key_points, minutes_action_items, minutes_action_deadlines,
+              next_consultation
+       FROM ss_member_journals
+       WHERE "courseID" = $1
+         AND lower(trim("groupName")) = lower(trim($2))
+       ORDER BY journal_date DESC, id DESC`,
+      [Number(courseId), groupName]
+    );
+
+    return res.json({ journals: rows });
+  } catch (err: any) {
+    console.error('Error fetching member journals:', err.message);
+    return res.status(500).json({ error: 'Failed to fetch member journals.' });
+  }
+});
+
+// ── POST member journal entry ──
+app.post('/api/member-journals', authenticate, authorizeRole(['Student', 'Adviser', 'Admin']), async (req, res) => {
+  const {
+    courseID,
+    groupID,
+    member_email,
+    journal_date,
+    task_updates,
+    action_plans,
+    issues,
+    minutes_date,
+    minutes_adviser,
+    minutes_key_points,
+    minutes_action_items,
+    minutes_action_deadlines,
+    next_consultation,
+  } = req.body;
+
+  if (!courseID || !groupID || !member_email || !journal_date) {
+    return res.status(400).json({ error: 'Missing required fields.' });
+  }
+
+  try {
+    const requester = (req as any).user;
+    const requesterEmail = String(requester?.email || '').trim().toLowerCase();
+    const targetEmail = String(member_email || '').trim().toLowerCase();
+
+    if (requester?.role === 'Student' && requesterEmail !== targetEmail) {
+      return res.status(403).json({ error: 'Students can only create journals for their own folder.' });
+    }
+
+    const groupRes = await pool.query(
+      'SELECT name, course_id FROM team_groups WHERE id = $1',
+      [groupID]
+    );
+    if (groupRes.rows.length === 0) {
+      return res.status(404).json({ error: 'Group not found.' });
+    }
+
+    const group = groupRes.rows[0];
+    if (Number(group.course_id) !== Number(courseID)) {
+      return res.status(400).json({ error: 'Group does not belong to this course.' });
+    }
+
+    const membershipRes = await pool.query(
+      `SELECT 1
+       FROM team_group_members
+       WHERE team_group_id = $1
+         AND lower(trim(email)) = lower(trim($2))
+       LIMIT 1`,
+      [groupID, targetEmail]
+    );
+
+    if (membershipRes.rows.length === 0) {
+      return res.status(400).json({ error: 'Member does not belong to this group.' });
+    }
+
+    const normalizeArray = (value: any): string[] => {
+      if (Array.isArray(value)) {
+        return value.map((v) => String(v || '').trim()).filter(Boolean);
+      }
+      return [];
+    };
+
+    const safeTaskUpdates = normalizeArray(task_updates);
+    const safeActionPlans = normalizeArray(action_plans);
+    const safeIssues = normalizeArray(issues);
+
+    const { rows } = await pool.query(
+      `INSERT INTO ss_member_journals
+        ("courseID", "groupName", member_email, journal_date, task_updates, action_plans, issues,
+         minutes_date, minutes_adviser, minutes_key_points, minutes_action_items, minutes_action_deadlines,
+         next_consultation)
+       VALUES ($1, $2, $3, $4, $5::jsonb, $6::jsonb, $7::jsonb, $8, $9, $10, $11, $12, $13)
+       RETURNING id, "courseID", "groupName", member_email, journal_date, task_updates, action_plans, issues,
+                 minutes_date, minutes_adviser, minutes_key_points, minutes_action_items, minutes_action_deadlines,
+                 next_consultation`,
+      [
+        Number(courseID),
+        group.name,
+        targetEmail,
+        journal_date,
+        JSON.stringify(safeTaskUpdates),
+        JSON.stringify(safeActionPlans),
+        JSON.stringify(safeIssues),
+        minutes_date || null,
+        minutes_adviser ? String(minutes_adviser).trim() : null,
+        minutes_key_points ? String(minutes_key_points).trim() : null,
+        minutes_action_items ? String(minutes_action_items).trim() : null,
+        minutes_action_deadlines ? String(minutes_action_deadlines).trim() : null,
+        next_consultation || null,
+      ]
+    );
+
+    return res.json(rows[0]);
+  } catch (err: any) {
+    console.error('Error creating member journal:', err.message);
+    return res.status(500).json({ error: 'Failed to create member journal.' });
+  }
 });
 
 // ================================================================
@@ -1422,31 +1617,322 @@ const getCalendarClient = (accessToken: string) => {
   return google.calendar({ version: 'v3', auth });
 };
 
-// GET /api/calendar/events — fetch upcoming events (90-day window)
+// GET /api/calendar/events — fetch events in a rolling window
 app.get('/api/calendar/events', async (req, res) => {
   const token = req.headers.authorization?.split(' ')[1];
   if (!token) return res.sendStatus(401);
-  const accessToken = await getAccessToken(token);
-  if (!accessToken) return res.status(403).json({ error: 'No Google access token. Please re-login.' });
 
   try {
-    const calendar = getCalendarClient(accessToken);
-    const timeMin = new Date().toISOString();
-    const timeMax = new Date(Date.now() + 90 * 24 * 60 * 60 * 1000).toISOString();
+    const decoded: any = jwt.verify(token, process.env.JWT_SECRET || 'test');
 
-    const response = await calendar.events.list({
-      calendarId: 'primary',
-      timeMin,
-      timeMax,
-      singleEvents: true,
-      orderBy: 'startTime',
-      maxResults: 100,
+    const timeMin = new Date(Date.now() - 90 * 24 * 60 * 60 * 1000).toISOString();
+    const timeMax = new Date(Date.now() + 365 * 24 * 60 * 60 * 1000).toISOString();
+    const minDate = timeMin.split('T')[0];
+    const maxDate = timeMax.split('T')[0];
+
+    const accessToken = await getAccessToken(token);
+
+    let googleEvents: any[] = [];
+    let googleError: string | null = null;
+
+    if (accessToken) {
+      try {
+        const calendar = getCalendarClient(accessToken);
+        const response = await calendar.events.list({
+          calendarId: 'primary',
+          timeMin,
+          timeMax,
+          singleEvents: true,
+          orderBy: 'startTime',
+          maxResults: 100,
+        });
+        googleEvents = response.data.items || [];
+      } catch (err: any) {
+        googleError = err?.message || 'Google Calendar fetch failed';
+      }
+    } else {
+      googleError = 'No Google access token found';
+    }
+
+    const role = String(decoded?.role || '');
+    const isInstructor = role === 'Admin' || role === 'Adviser' || role === 'Advisers';
+    const isStudent = !isInstructor;
+    if (isStudent) {
+      // Student/group calendar should not show open consultations from Google feed.
+      googleEvents = googleEvents.filter(
+        (event: any) => !String(event?.summary || '').toLowerCase().includes('consultation')
+      );
+    } else {
+      // Adviser/Admin should not see past consultations in calendar.
+      const nowTs = Date.now();
+      googleEvents = googleEvents.filter((event: any) => {
+        const summary = String(event?.summary || '').toLowerCase();
+        if (!summary.includes('consultation')) return true;
+
+        const endDateTime = event?.end?.dateTime;
+        const endDate = event?.end?.date;
+        const endTs = endDateTime
+          ? new Date(endDateTime).getTime()
+          : endDate
+            ? new Date(`${endDate}T23:59:59`).getTime()
+            : NaN;
+
+        if (!Number.isFinite(endTs)) return true;
+        return endTs >= nowTs;
+      });
+    }
+
+    const googleEventIds = new Set(googleEvents.map((e: any) => e.id).filter(Boolean));
+
+    let consultationRows: any[] = [];
+    const calendarDebug: any = {
+      enabled: true,
+      role,
+      isStudent,
+      requesterEmail: null,
+      groupNamesLower: [] as string[],
+      legacyGroupIds: [] as number[],
+      relevantSlotIds: [] as number[],
+      directBookedSlotIds: [] as number[],
+      mergedSlotIds: [] as number[],
+      returnedFallbackSlotIds: [] as number[],
+      googleEventCount: googleEvents.length,
+    };
+
+    if (isStudent) {
+      let requesterEmail = String(
+        decoded?.email || decoded?.accountEmail || decoded?.account_email || ''
+      ).trim().toLowerCase();
+      const requesterId = decoded?.id || decoded?.account_id;
+      if (!requesterEmail && requesterId) {
+        const accountEmailRes = await pool.query(
+          'SELECT "accountEmail" FROM ss_account WHERE account_id = $1',
+          [requesterId]
+        );
+        requesterEmail = String(accountEmailRes.rows[0]?.accountEmail || '').trim().toLowerCase();
+      }
+      calendarDebug.requesterEmail = requesterEmail || null;
+
+      const memberships = await pool.query(
+        `SELECT tg.name as group_name,
+                sg."smallgroupID" as legacy_group_id
+         FROM team_group_members tgm
+         JOIN team_groups tg ON tg.id = tgm.team_group_id
+         LEFT JOIN ss_group sg ON lower(trim(sg."groupName")) = lower(trim(tg.name))
+         WHERE lower(trim(tgm.email)) = lower(trim($1))`,
+        [requesterEmail || '']
+      );
+
+      const groupNamesLower = memberships.rows
+        .map((m: any) => String(m.group_name || '').trim().toLowerCase())
+        .filter(Boolean);
+      const legacyGroupIds = memberships.rows
+        .map((m: any) => Number(m.legacy_group_id))
+        .filter((n: number) => Number.isFinite(n));
+      calendarDebug.groupNamesLower = groupNamesLower;
+      calendarDebug.legacyGroupIds = legacyGroupIds;
+
+      if (groupNamesLower.length > 0 || legacyGroupIds.length > 0 || !!requesterEmail) {
+        const relevantConsultations = await pool.query(
+            `SELECT cs.slot_id,
+              cs.slot_date,
+              cs.slot_date::text as slot_date_only,
+                  cs.start_time,
+                  cs.end_time,
+                  cs.slot_type,
+                  cs.google_event_id,
+                  csg.group_name as reserved_group_name,
+                  EXISTS (
+                    SELECT 1
+                    FROM ss_consultation_bookings cb
+                    WHERE cb.slot_id = cs.slot_id
+                      AND cb.status = 'BOOKED'
+                      AND (
+                        lower(trim(cb.group_name)) = ANY($3::text[])
+                        OR cb.group_id = ANY($4::int[])
+                      )
+                  ) as booked_by_group,
+                  EXISTS (
+                    SELECT 1
+                    FROM ss_consultation_bookings cb
+                    WHERE cb.slot_id = cs.slot_id
+                      AND cb.status = 'BOOKED'
+                      AND lower(trim(cb.booked_by_email)) = lower(trim($5))
+                  ) as booked_by_user
+           FROM ss_consultation_slots cs
+           LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+           WHERE cs.slot_date BETWEEN $1::date AND $2::date
+             AND (
+               lower(trim(COALESCE(csg.group_name, ''))) = ANY($3::text[])
+               OR EXISTS (
+                 SELECT 1
+                 FROM ss_consultation_bookings cb
+                 WHERE cb.slot_id = cs.slot_id
+                   AND cb.status = 'BOOKED'
+                   AND (
+                     lower(trim(cb.group_name)) = ANY($3::text[])
+                     OR cb.group_id = ANY($4::int[])
+                   )
+               )
+               OR EXISTS (
+                 SELECT 1
+                 FROM ss_consultation_bookings cb
+                 WHERE cb.slot_id = cs.slot_id
+                   AND cb.status = 'BOOKED'
+                   AND lower(trim(cb.booked_by_email)) = lower(trim($5))
+               )
+               OR cs.allowed_group_id = ANY($4::int[])
+             )
+           ORDER BY cs.slot_date ASC, cs.start_time ASC`,
+          [minDate, maxDate, groupNamesLower, legacyGroupIds, requesterEmail || '']
+        );
+        calendarDebug.relevantSlotIds = relevantConsultations.rows.map((row: any) => Number(row.slot_id));
+
+        let bookedByUserRows: any[] = [];
+        if (requesterEmail) {
+          const directBookings = await pool.query(
+                `SELECT cs.slot_id,
+                  cs.slot_date,
+                  cs.slot_date::text as slot_date_only,
+                    cs.start_time,
+                    cs.end_time,
+                    cs.slot_type,
+                    cs.google_event_id,
+                    csg.group_name as reserved_group_name,
+                    true as booked_by_group,
+                    true as booked_by_user
+             FROM ss_consultation_bookings cb
+             JOIN ss_consultation_slots cs ON cs.slot_id = cb.slot_id
+             LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+             WHERE cb.status = 'BOOKED'
+               AND lower(trim(cb.booked_by_email)) = lower(trim($1))
+               AND cs.slot_date BETWEEN $2::date AND $3::date
+             ORDER BY cs.slot_date ASC, cs.start_time ASC`,
+            [requesterEmail, minDate, maxDate]
+          );
+          bookedByUserRows = directBookings.rows;
+          calendarDebug.directBookedSlotIds = bookedByUserRows.map((row: any) => Number(row.slot_id));
+        }
+
+        const mergedBySlot = new Map<number, any>();
+        [...relevantConsultations.rows, ...bookedByUserRows].forEach((row: any) => {
+          if (!mergedBySlot.has(Number(row.slot_id))) {
+            mergedBySlot.set(Number(row.slot_id), row);
+          }
+        });
+        consultationRows = Array.from(mergedBySlot.values());
+        calendarDebug.mergedSlotIds = consultationRows.map((row: any) => Number(row.slot_id));
+      }
+    } else {
+      // Adviser/Admin: include owned consultation slots that may not exist in Google feed.
+      const ownedConsultations = await pool.query(
+        `SELECT slot_id, slot_date, slot_date::text as slot_date_only, start_time, end_time, slot_type, google_event_id,
+                NULL::text as reserved_group_name,
+                false as booked_by_group
+         FROM ss_consultation_slots
+         WHERE owner_account_id = $1
+           AND slot_date BETWEEN $2::date AND $3::date
+           AND (slot_date::date + end_time::time) >= ((now() AT TIME ZONE 'Asia/Manila')::timestamp)
+         ORDER BY slot_date ASC, start_time ASC`,
+        [decoded.id, minDate, maxDate]
+      );
+      consultationRows = ownedConsultations.rows;
+    }
+
+    const toDateOnly = (value: any): string => {
+      const raw = String(value || '').trim();
+      const isoMatch = raw.match(/^(\d{4}-\d{2}-\d{2})/);
+      if (isoMatch && isoMatch[1]) return isoMatch[1];
+      const parsed = new Date(raw);
+      if (!Number.isNaN(parsed.getTime())) {
+        const yyyy = parsed.getFullYear();
+        const mm = String(parsed.getMonth() + 1).padStart(2, '0');
+        const dd = String(parsed.getDate()).padStart(2, '0');
+        return `${yyyy}-${mm}-${dd}`;
+      }
+      return raw;
+    };
+
+    const toTimeOnly = (value: any): string => {
+      const raw = String(value || '').trim();
+      const match = raw.match(/^(\d{2}:\d{2})(?::(\d{2}))?/);
+      if (!match) return raw;
+      const hhmm = match[1];
+      const ss = match[2] || '00';
+      return `${hhmm}:${ss}`;
+    };
+
+    const fallbackConsultationEvents = consultationRows
+      .filter((slot: any) => !slot.google_event_id || !googleEventIds.has(slot.google_event_id))
+      .map((slot: any) => {
+        const slotDate = toDateOnly(slot.slot_date_only || slot.slot_date);
+        const startTime = toTimeOnly(slot.start_time);
+        const endTime = toTimeOnly(slot.end_time);
+        const summary = isStudent
+          ? ((slot.booked_by_group || slot.booked_by_user)
+              ? 'Consultation (Booked)'
+              : 'Consultation (Reserved for Your Group)')
+          : `Consultation (${slot.slot_type === 'SPECIFIC_GROUP' ? 'Specific Group' : 'FCFS'})`;
+
+        return {
+          id: `consultation-slot-${slot.slot_id}`,
+          summary,
+          description: `Consultation slot #${slot.slot_id}`,
+          start: { dateTime: `${slotDate}T${startTime}+08:00`, timeZone: 'Asia/Manila' },
+          end: { dateTime: `${slotDate}T${endTime}+08:00`, timeZone: 'Asia/Manila' },
+        };
+      });
+    calendarDebug.returnedFallbackSlotIds = fallbackConsultationEvents
+      .map((event: any) => String(event.id || ''))
+      .filter((id: string) => id.startsWith('consultation-slot-'))
+      .map((id: string) => Number(id.replace('consultation-slot-', '')))
+      .filter((n: number) => Number.isFinite(n));
+    calendarDebug.fallbackConsultationCount = fallbackConsultationEvents.length;
+
+    return res.json({
+      events: [...googleEvents, ...fallbackConsultationEvents],
+      calendarStatus: {
+        googleConnected: !!accessToken,
+        googleFetchOk: !googleError,
+        googleError,
+        fallbackConsultationCount: fallbackConsultationEvents.length,
+      },
+      calendarDebug,
     });
-
-    return res.json({ events: response.data.items || [] });
   } catch (err: any) {
     console.error('Error fetching calendar events:', err.message);
     return res.status(500).json({ error: 'Failed to fetch calendar events.' });
+  }
+});
+
+// GET /api/calendar/connection-status — quick Google Calendar connectivity check
+app.get('/api/calendar/connection-status', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || 'test');
+
+    const accessToken = await getAccessToken(token);
+    if (!accessToken) {
+      return res.json({
+        connected: false,
+        reason: 'No Google access token. Please re-login with Google.',
+      });
+    }
+
+    try {
+      const calendar = getCalendarClient(accessToken);
+      await calendar.calendarList.list({ maxResults: 1 });
+      return res.json({ connected: true });
+    } catch (err: any) {
+      return res.json({
+        connected: false,
+        reason: err?.message || 'Unable to reach Google Calendar API',
+      });
+    }
+  } catch {
+    return res.sendStatus(403);
   }
 });
 
@@ -1547,6 +2033,1496 @@ app.delete('/api/calendar/events/:eventId', async (req, res) => {
     console.error('Error deleting calendar event:', err.message);
     return res.status(500).json({ error: 'Failed to delete calendar event.' });
   }
+});
+
+// ================================================================
+// CONSULTATION BOOKING SYSTEM API
+// ================================================================
+
+const ensureLegacyGroupIdFromTeamGroup = async (teamGroupId: string): Promise<number | null> => {
+  const teamResult = await pool.query(
+    `SELECT
+        tg.id,
+        tg.name AS "groupName",
+        tg.course_id AS "courseID",
+        tgm.member_number,
+        tgm.email,
+        tgm.is_leader
+     FROM team_groups tg
+     LEFT JOIN team_group_members tgm ON tgm.team_group_id = tg.id
+     WHERE tg.id = $1
+     ORDER BY tgm.member_number ASC`,
+    [teamGroupId]
+  );
+
+  if (teamResult.rows.length === 0) return null;
+
+  const groupName = teamResult.rows[0].groupName;
+
+  const existingLegacy = await pool.query(
+    `SELECT "smallgroupID" AS "smallgroupID"
+     FROM ss_group
+     WHERE lower(trim("groupName")) = lower(trim($1))
+     LIMIT 1`,
+    [groupName]
+  );
+
+  if (existingLegacy.rows.length > 0) {
+    const existingId = Number(existingLegacy.rows[0].smallgroupID);
+    return Number.isFinite(existingId) ? existingId : null;
+  }
+
+  const members: Array<string | null> = [null, null, null, null, null];
+  const roles: Array<string | null> = [null, null, null, null, null];
+
+  for (const row of teamResult.rows) {
+    const idx = Number(row.member_number) - 1;
+    if (idx >= 0 && idx < 5) {
+      members[idx] = row.email || null;
+      roles[idx] = row.email ? (row.is_leader ? 'leader' : 'member') : null;
+    }
+  }
+
+  let inserted;
+  try {
+    inserted = await pool.query(
+      `INSERT INTO ss_group
+        ("groupName", member1, member2, member3, member4, member5, "roleOne", "roleTwo", "roleThree", "roleFour", "roleFive")
+       VALUES
+        ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+       RETURNING "smallgroupID"`,
+      [
+        groupName,
+        members[0],
+        members[1],
+        members[2],
+        members[3],
+        members[4],
+        roles[0],
+        roles[1],
+        roles[2],
+        roles[3],
+        roles[4],
+      ]
+    );
+  } catch {
+    return null;
+  }
+
+  const createdId = Number(inserted.rows[0]?.smallgroupID);
+  return Number.isFinite(createdId) ? createdId : null;
+};
+
+// GET /api/group/by-member/:email — Get a user's group
+app.get('/api/group/by-member/:email', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err) return res.sendStatus(403);
+
+    try {
+      const { email } = req.params;
+      const normalizedEmail = String(email || '').trim().toLowerCase();
+      
+      // Resolve membership from team_group_members (temporary source of truth for booking permissions).
+      const { rows } = await pool.query(
+        `SELECT
+            tg.id AS "smallgroupID",
+            tg.name AS "groupName",
+            tg.course_id AS "courseID",
+            tgm.member_number AS requester_member_number
+         FROM team_group_members tgm
+         JOIN team_groups tg ON tg.id = tgm.team_group_id
+         WHERE lower(trim(tgm.email)) = $1
+         ORDER BY tgm.member_number ASC
+         LIMIT 1`,
+        [normalizedEmail]
+      );
+
+      if (rows.length === 0) {
+        return res.json({ group: null });
+      }
+
+      const group = rows[0];
+      const memberNumber = group.requester_member_number ? Number(group.requester_member_number) : null;
+
+      // Resolve legacy numeric group id for booking tables that still use integer group_id.
+      let bookingGroupId: number | null = null;
+      try {
+        const legacyGroupResult = await pool.query(
+          `SELECT "smallgroupID" AS "smallgroupID"
+           FROM ss_group
+           WHERE lower(trim("groupName")) = lower(trim($1))
+           LIMIT 1`,
+          [group.groupName]
+        );
+        if (legacyGroupResult.rows.length > 0) {
+          const parsed = Number(legacyGroupResult.rows[0].smallgroupID);
+          bookingGroupId = Number.isFinite(parsed) ? parsed : null;
+        }
+      } catch {
+        bookingGroupId = null;
+      }
+
+      if (bookingGroupId == null) {
+        try {
+          bookingGroupId = await ensureLegacyGroupIdFromTeamGroup(String(group.smallgroupID));
+        } catch {
+          bookingGroupId = null;
+        }
+      }
+
+      const membersResult = await pool.query(
+        `SELECT member_number, email, is_leader
+         FROM team_group_members
+         WHERE team_group_id = $1
+         ORDER BY member_number ASC`,
+        [group.smallgroupID]
+      );
+
+      const member1 = membersResult.rows.find((m: any) => Number(m.member_number) === 1)?.email || null;
+      const member2 = membersResult.rows.find((m: any) => Number(m.member_number) === 2)?.email || null;
+      const leader = membersResult.rows.find((m: any) => Boolean(m.is_leader))?.email || member1;
+      const canBookConsultation = memberNumber === 1 || memberNumber === 2;
+
+      return res.json({
+        group: {
+          ...group,
+          teamGroupID: group.smallgroupID,
+          smallgroupID: bookingGroupId,
+          bookingGroupId,
+          member1,
+          member2,
+          roleOne: leader,
+          canBookConsultation,
+          memberNumber,
+        },
+      });
+    } catch (err: any) {
+      console.error('Error fetching group:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch group.' });
+    }
+  });
+});
+
+// POST /api/consultation/slots — Adviser creates consultation slots
+app.post('/api/consultation/slots', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { courseId, slotDate, startTime, endTime, slotType, maxGroups, allowedGroupId, selectedGroups, multipleSlots, isWholeDay, isWholeWeek } = req.body;
+
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS public.ss_consultation_slot_groups (
+          id serial PRIMARY KEY,
+          slot_id integer NOT NULL UNIQUE REFERENCES public.ss_consultation_slots(slot_id) ON DELETE CASCADE,
+          group_ref text,
+          group_name text NOT NULL,
+          created_at timestamp with time zone NOT NULL DEFAULT now()
+        )`
+      );
+
+      if (!courseId || !slotDate || !startTime || !endTime || !slotType) {
+        return res.status(400).json({ error: 'Missing required fields.' });
+      }
+
+      // Get adviser's access token for Google Calendar
+      const { rows } = await pool.query(
+        'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+        [user.id]
+      );
+      
+      if (!rows[0]?.googleAccessToken) {
+        return res.status(403).json({ error: 'No Google access token. Please re-login.' });
+      }
+
+      const calendar = getCalendarClient(rows[0].googleAccessToken);
+      const createdSlots = [];
+      
+      // Determine which groups to create slots for
+      let groupsToCreate = [];
+      if (slotType === 'SPECIFIC_GROUP' && selectedGroups && Array.isArray(selectedGroups)) {
+        groupsToCreate = selectedGroups; // Multiple groups
+      } else if (allowedGroupId) {
+        groupsToCreate = [allowedGroupId]; // Legacy single group
+      } else {
+        groupsToCreate = [null]; // FCFS slot with no specific group
+      }
+
+      const parseTimeToMinutes = (time: string, fallback: number) => {
+        if (!time || typeof time !== 'string' || !time.includes(':')) return fallback;
+        const parts = time.split(':');
+        const h = Number(parts[0]);
+        const m = Number(parts[1]);
+        if (!Number.isFinite(h) || !Number.isFinite(m)) return fallback;
+        return h * 60 + m;
+      };
+
+      const formatMinutesToTime = (totalMinutes: number) => {
+        const h = Math.floor(totalMinutes / 60)
+          .toString()
+          .padStart(2, '0');
+        const m = (totalMinutes % 60).toString().padStart(2, '0');
+        return `${h}:${m}`;
+      };
+
+      if (slotType === 'SPECIFIC_GROUP' && groupsToCreate.length === 0) {
+        return res.status(400).json({ error: 'Please select at least one group.' });
+      }
+
+      // Generate time slots for each group/date combination
+      let timeSlots: Array<{date: string, groupId: any, groupName: string, start: string, end: string}> = [];
+
+      // Build target dates for slot creation.
+      let slotDates = [String(slotDate).slice(0, 10)];
+      if (isWholeWeek) {
+        const base = new Date(String(slotDate));
+        if (Number.isNaN(base.getTime())) {
+          return res.status(400).json({ error: 'Invalid slot date for whole-week schedule.' });
+        }
+        const monday = new Date(base);
+        const dayOfWeek = monday.getDay();
+        const toMondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek;
+        monday.setDate(monday.getDate() + toMondayOffset);
+
+        slotDates = Array.from({ length: 6 }).map((_, idx) => {
+          const d = new Date(monday);
+          d.setDate(monday.getDate() + idx);
+          const yyyy = d.getFullYear();
+          const mm = String(d.getMonth() + 1).padStart(2, '0');
+          const dd = String(d.getDate()).padStart(2, '0');
+          return `${yyyy}-${mm}-${dd}`;
+        });
+      } else if (multipleSlots && Array.isArray(multipleSlots) && multipleSlots.length > 0) {
+        slotDates = multipleSlots.map((d: any) => String(d || '').slice(0, 10)).filter(Boolean);
+      }
+      
+      if (isWholeDay && slotType === 'SPECIFIC_GROUP' && groupsToCreate.length > 0) {
+        // Whole-day specific groups: cap each group to <= 60 minutes and add 10-minute breaks.
+        const breakBetweenGroups = 10;
+        const lunchStart = 12 * 60;
+        const lunchEnd = 13 * 60 + 30;
+        const numGroups = groupsToCreate.length;
+        const dayStart = parseTimeToMinutes(startTime, 8 * 60);
+        const dayEnd = parseTimeToMinutes(endTime, 17 * 60);
+        const totalMinutes = dayEnd - dayStart;
+
+        if (totalMinutes <= 0) {
+          return res.status(400).json({ error: 'Invalid consultation time range.' });
+        }
+
+        const totalBreakTime = (numGroups - 1) * breakBetweenGroups;
+        const lunchOverlap = Math.max(0, Math.min(dayEnd, lunchEnd) - Math.max(dayStart, lunchStart));
+        const availableTime = totalMinutes - totalBreakTime - lunchOverlap;
+        const minutesPerGroup = Math.min(60, Math.floor(availableTime / numGroups));
+
+        if (minutesPerGroup <= 0) {
+          return res.status(400).json({
+            error: 'Not enough time to schedule all selected groups with breaks. Please reduce groups or use a different date.',
+          });
+        }
+        
+        for (const date of slotDates) {
+          let currentMinute = dayStart;
+
+          for (const groupId of groupsToCreate) {
+            const groupData = await pool.query('SELECT name FROM team_groups WHERE id = $1', [groupId]);
+            const groupName = groupData.rows[0]?.name || 'Group ' + groupId;
+
+            // Never start a consultation during lunch break.
+            if (currentMinute >= lunchStart && currentMinute < lunchEnd) {
+              currentMinute = lunchEnd;
+            }
+
+            let endMinute = currentMinute + minutesPerGroup;
+
+            // If a slot would overlap lunch, move it after lunch.
+            if (currentMinute < lunchStart && endMinute > lunchStart) {
+              currentMinute = lunchEnd;
+              endMinute = currentMinute + minutesPerGroup;
+            }
+
+            if (endMinute > dayEnd) {
+              return res.status(400).json({
+                error: 'Selected groups do not fit within the available day window. Reduce groups or choose another date.',
+              });
+            }
+
+            timeSlots.push({
+              date,
+              groupId,
+              groupName,
+              start: formatMinutesToTime(currentMinute),
+              end: formatMinutesToTime(endMinute)
+            });
+
+            // Move to next slot with fixed 10-minute break.
+            currentMinute = endMinute + breakBetweenGroups;
+          }
+        }
+      } else {
+        // Original logic: handle slots as before
+        for (const date of slotDates) {
+          for (const groupId of groupsToCreate) {
+            const groupData = groupId ? await pool.query('SELECT name FROM team_groups WHERE id = $1', [groupId]) : { rows: [] };
+            const groupName = groupId && groupData.rows[0] ? groupData.rows[0].name : 'Available';
+            
+            timeSlots.push({
+              date,
+              groupId,
+              groupName,
+              start: startTime,
+              end: endTime
+            });
+          }
+        }
+      }
+      
+      // Create slots for each time slot
+      for (const timeSlot of timeSlots) {
+        try {
+          // Insert slot
+          const slotResult = await pool.query(
+            `INSERT INTO ss_consultation_slots 
+             (course_id, owner_account_id, owner_role, slot_date, start_time, end_time, slot_type, max_groups, allowed_group_id)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NULL)
+             RETURNING *`,
+            [courseId, user.id, user.role, String(timeSlot.date || slotDate).slice(0, 10), timeSlot.start, timeSlot.end, slotType, maxGroups || 1]
+          );
+
+          const slot = slotResult.rows[0];
+
+          if (slotType === 'SPECIFIC_GROUP' && timeSlot.groupId) {
+            await pool.query(
+              `INSERT INTO ss_consultation_slot_groups (slot_id, group_ref, group_name)
+               VALUES ($1, $2, $3)
+               ON CONFLICT (slot_id) DO UPDATE
+               SET group_ref = EXCLUDED.group_ref,
+                   group_name = EXCLUDED.group_name`,
+              [slot.slot_id, String(timeSlot.groupId), timeSlot.groupName]
+            );
+          }
+
+          // Create Google Calendar event
+          try {
+            const slotDateOnly = String(timeSlot.date || slotDate).slice(0, 10);
+            const startDateTime = `${slotDateOnly}T${timeSlot.start}:00+08:00`;
+            const endDateTime = `${slotDateOnly}T${timeSlot.end}:00+08:00`;
+
+            const event = await calendar.events.insert({
+              calendarId: 'primary',
+              resource: {
+                summary: `Consultation - ${timeSlot.groupName}`,
+                description: `Consultation slot - ${slotType === 'SPECIFIC_GROUP' ? timeSlot.groupName : 'First Come First Serve'}`,
+                start: { dateTime: startDateTime, timeZone: 'Asia/Manila' },
+                end: { dateTime: endDateTime, timeZone: 'Asia/Manila' },
+              },
+            } as any);
+
+            // Update slot with Google Event ID
+            await pool.query(
+              'UPDATE ss_consultation_slots SET google_event_id = $1 WHERE slot_id = $2',
+              [event.data.id, slot.slot_id]
+            );
+
+            createdSlots.push({ ...slot, google_event_id: event.data.id });
+          } catch (calErr: any) {
+            console.error('Google Calendar error:', calErr.message);
+            createdSlots.push(slot); // Return slot even if calendar creation fails
+          }
+        } catch (err: any) {
+          console.error('Error creating slot:', err.message);
+        }
+      }
+
+      console.log('Created', createdSlots.length, 'slots for course', courseId);
+      return res.json({ slots: createdSlots });
+    } catch (err: any) {
+      console.error('Error creating consultation slots:', err.message);
+      return res.status(500).json({ error: 'Failed to create consultation slots.' });
+    }
+  });
+});
+
+// GET /api/consultation/slots/:courseId — Get available slots for a course
+app.get('/api/consultation/slots/:courseId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err) return res.sendStatus(403);
+
+    try {
+      const { courseId } = req.params;
+      const { futureOnly, groupName } = req.query;
+
+      let query = `
+        SELECT 
+          cs.*,
+          to_char(cs.slot_date::date, 'YYYY-MM-DD') as slot_date_only,
+          csg.group_name as reserved_group_name,
+          sa."accountName" as adviser_name,
+          (SELECT COUNT(*) FROM ss_consultation_bookings 
+           WHERE slot_id = cs.slot_id AND status = 'BOOKED') as current_groups,
+          CASE
+            WHEN cs.slot_type = 'SPECIFIC_GROUP' AND csg.group_name IS NOT NULL
+              THEN LEAST(cs.max_groups, (SELECT COUNT(*) FROM ss_consultation_bookings WHERE slot_id = cs.slot_id AND status = 'BOOKED') + 1)
+            ELSE (SELECT COUNT(*) FROM ss_consultation_bookings WHERE slot_id = cs.slot_id AND status = 'BOOKED')
+          END as current_groups_display
+        FROM ss_consultation_slots cs
+        JOIN ss_account sa ON cs.owner_account_id = sa.account_id
+        LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+        WHERE cs.course_id = $1
+      `;
+
+      const params: any[] = [courseId];
+
+      if (futureOnly === 'true') {
+        query += ` AND cs.slot_date::date >= CURRENT_DATE`;
+      }
+
+      if (groupName && String(groupName).trim()) {
+        params.push(String(groupName));
+        query += ` AND (
+          cs.slot_type = 'FIRST_COME_FIRST_SERVE'
+          OR lower(trim(csg.group_name)) = lower(trim($${params.length}))
+        )`;
+      }
+
+      query += ` ORDER BY cs.slot_date::date ASC, cs.start_time ASC`;
+
+      const { rows } = await pool.query(query, params);
+      return res.json({ slots: rows });
+    } catch (err: any) {
+      console.error('Error fetching slots:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch slots.' });
+    }
+  });
+});
+
+// GET /api/consultation/slots/adviser/:adviserId — Get adviser's slots
+app.get('/api/consultation/slots/adviser/:adviserId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { adviserId } = req.params;
+      
+      // Only allow advisers to see their own data
+      if (user.id != adviserId && user.role !== 'Admin') {
+        return res.sendStatus(403);
+      }
+
+      const { rows } = await pool.query(
+        `SELECT 
+          cs.*,
+          to_char(cs.slot_date::date, 'YYYY-MM-DD') as slot_date_only,
+          csg.group_name as reserved_group_name,
+          (SELECT COUNT(*) FROM ss_consultation_bookings 
+           WHERE slot_id = cs.slot_id AND status IN ('BOOKED', 'RESCHEDULED', 'CONFIRMED')) as current_groups,
+          CASE
+            WHEN cs.slot_type = 'SPECIFIC_GROUP' AND csg.group_name IS NOT NULL
+              THEN LEAST(cs.max_groups, (SELECT COUNT(*) FROM ss_consultation_bookings WHERE slot_id = cs.slot_id AND status IN ('BOOKED', 'RESCHEDULED', 'CONFIRMED')) + 1)
+            ELSE (SELECT COUNT(*) FROM ss_consultation_bookings WHERE slot_id = cs.slot_id AND status IN ('BOOKED', 'RESCHEDULED', 'CONFIRMED'))
+          END as current_groups_display
+        FROM ss_consultation_slots cs
+        LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+        WHERE cs.owner_account_id = $1
+        ORDER BY cs.slot_date::date ASC, cs.start_time ASC`,
+        [adviserId]
+      );
+
+      return res.json({ slots: rows });
+    } catch (err: any) {
+      console.error('Error fetching adviser slots:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch adviser slots.' });
+    }
+  });
+});
+
+// PUT /api/consultation/slots/:slotId — Adviser/Admin updates a consultation slot
+app.put('/api/consultation/slots/:slotId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotId } = req.params;
+      const { slotDate, startTime, endTime, maxGroups } = req.body;
+
+      if (!slotDate || !startTime || !endTime) {
+        return res.status(400).json({ error: 'slotDate, startTime, and endTime are required.' });
+      }
+
+      const slotResult = await pool.query(
+        `SELECT cs.*, csg.group_name as reserved_group_name
+         FROM ss_consultation_slots cs
+         LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+         WHERE cs.slot_id = $1`,
+        [slotId]
+      );
+
+      if (slotResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Slot not found.' });
+      }
+
+      const slot = slotResult.rows[0];
+      if (user.role !== 'Admin' && user.id != slot.owner_account_id) {
+        return res.sendStatus(403);
+      }
+
+      if (startTime >= endTime) {
+        return res.status(400).json({ error: 'Start time must be earlier than end time.' });
+      }
+
+      const updated = await pool.query(
+        `UPDATE ss_consultation_slots
+         SET slot_date = $1::date,
+             start_time = $2,
+             end_time = $3,
+             max_groups = CASE WHEN $4::int IS NULL THEN max_groups ELSE $4::int END
+         WHERE slot_id = $5
+         RETURNING *`,
+        [slotDate, startTime, endTime, maxGroups ?? null, slotId]
+      );
+
+      const updatedSlot = updated.rows[0];
+
+      if (slot.google_event_id) {
+        try {
+          const ownerTokenResult = await pool.query(
+            'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+            [slot.owner_account_id]
+          );
+
+          const ownerAccessToken = ownerTokenResult.rows[0]?.googleAccessToken;
+          if (ownerAccessToken) {
+            const calendar = getCalendarClient(ownerAccessToken);
+            const groupLabel = slot.reserved_group_name || (slot.slot_type === 'FIRST_COME_FIRST_SERVE' ? 'FCFS' : 'Specific Group');
+            await calendar.events.update({
+              calendarId: 'primary',
+              eventId: slot.google_event_id,
+              resource: {
+                summary: `Consultation - ${groupLabel}`,
+                description: `Consultation slot - ${groupLabel}`,
+                start: { dateTime: `${slotDate}T${startTime}:00+08:00`, timeZone: 'Asia/Manila' },
+                end: { dateTime: `${slotDate}T${endTime}:00+08:00`, timeZone: 'Asia/Manila' },
+              },
+            } as any);
+          }
+        } catch (calErr: any) {
+          console.error('Google Calendar update error:', calErr.message);
+        }
+      }
+
+      return res.json({ slot: updatedSlot });
+    } catch (err: any) {
+      console.error('Error updating consultation slot:', err.message);
+      return res.status(500).json({ error: 'Failed to update consultation slot.' });
+    }
+  });
+});
+
+// DELETE /api/consultation/slots/:slotId — Adviser/Admin deletes a consultation slot
+app.delete('/api/consultation/slots/:slotId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotId } = req.params;
+
+      const slotResult = await pool.query(
+        'SELECT slot_id, owner_account_id, google_event_id FROM ss_consultation_slots WHERE slot_id = $1',
+        [slotId]
+      );
+
+      if (slotResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Slot not found.' });
+      }
+
+      const slot = slotResult.rows[0];
+      if (user.role !== 'Admin' && user.id != slot.owner_account_id) {
+        return res.sendStatus(403);
+      }
+
+      if (slot.google_event_id) {
+        try {
+          const ownerTokenResult = await pool.query(
+            'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+            [slot.owner_account_id]
+          );
+          const ownerAccessToken = ownerTokenResult.rows[0]?.googleAccessToken;
+
+          if (ownerAccessToken) {
+            const calendar = getCalendarClient(ownerAccessToken);
+            await calendar.events.delete({
+              calendarId: 'primary',
+              eventId: slot.google_event_id,
+            } as any);
+          }
+        } catch (calErr: any) {
+          console.error('Google Calendar delete error:', calErr.message);
+        }
+      }
+
+      await pool.query('DELETE FROM ss_consultation_slots WHERE slot_id = $1', [slotId]);
+      return res.json({ success: true });
+    } catch (err: any) {
+      console.error('Error deleting consultation slot:', err.message);
+      return res.status(500).json({ error: 'Failed to delete consultation slot.' });
+    }
+  });
+});
+
+// PUT /api/consultation/slots/day/:slotDate — Adviser/Admin updates all owned slots on a day
+app.put('/api/consultation/slots/day/:slotDate', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotDate } = req.params;
+      const { newDate, maxGroups, extraGroups } = req.body;
+      const normalizedSlotDate = String(slotDate || '').split('T')[0];
+      const normalizedNewDate = String(newDate || '').split('T')[0];
+      const parsedExtraGroups = Number.isFinite(Number(extraGroups)) ? Number(extraGroups) : 0;
+
+      if (!normalizedNewDate) {
+        return res.status(400).json({ error: 'newDate is required.' });
+      }
+
+      if (parsedExtraGroups < 0 || parsedExtraGroups > 5) {
+        return res.status(400).json({ error: 'extraGroups must be between 0 and 5.' });
+      }
+
+      const slotsResult = await pool.query(
+        `SELECT cs.*, csg.group_name as reserved_group_name
+         FROM ss_consultation_slots cs
+         LEFT JOIN ss_consultation_slot_groups csg ON csg.slot_id = cs.slot_id
+         WHERE cs.owner_account_id = $1 AND cs.slot_date::date = $2::date
+         ORDER BY cs.start_time ASC`,
+        [user.id, normalizedSlotDate]
+      );
+
+      if (slotsResult.rows.length === 0) {
+        return res.status(404).json({ error: 'No consultation slots found for this date.' });
+      }
+
+      const updatedSlots = [];
+
+      const parseTimeToMinutes = (timeValue: string): number => {
+        const [hourRaw, minuteRaw] = String(timeValue || '00:00').split(':');
+        const hour = Number(hourRaw);
+        const minute = Number(minuteRaw);
+        if (Number.isNaN(hour) || Number.isNaN(minute)) return 0;
+        return hour * 60 + minute;
+      };
+
+      const formatMinutesToTime = (totalMinutes: number): string => {
+        const hour = Math.floor(totalMinutes / 60).toString().padStart(2, '0');
+        const minute = (totalMinutes % 60).toString().padStart(2, '0');
+        return `${hour}:${minute}`;
+      };
+
+      for (const slot of slotsResult.rows) {
+        const updated = await pool.query(
+          `UPDATE ss_consultation_slots
+           SET slot_date = $1::date,
+               max_groups = CASE
+                 WHEN $2::int IS NULL THEN max_groups
+                 WHEN slot_type = 'FIRST_COME_FIRST_SERVE' THEN $2::int
+                 ELSE max_groups
+               END
+           WHERE slot_id = $3
+           RETURNING *`,
+          [normalizedNewDate, maxGroups ?? null, slot.slot_id]
+        );
+
+        updatedSlots.push(updated.rows[0]);
+
+        if (slot.google_event_id) {
+          try {
+            const ownerTokenResult = await pool.query(
+              'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+              [slot.owner_account_id]
+            );
+
+            const ownerAccessToken = ownerTokenResult.rows[0]?.googleAccessToken;
+            if (ownerAccessToken) {
+              const calendar = getCalendarClient(ownerAccessToken);
+              const groupLabel = slot.reserved_group_name || (slot.slot_type === 'FIRST_COME_FIRST_SERVE' ? 'FCFS' : 'Specific Group');
+              await calendar.events.update({
+                calendarId: 'primary',
+                eventId: slot.google_event_id,
+                resource: {
+                  summary: `Consultation - ${groupLabel}`,
+                  description: `Consultation slot - ${groupLabel}`,
+                  start: { dateTime: `${normalizedNewDate}T${slot.start_time}:00+08:00`, timeZone: 'Asia/Manila' },
+                  end: { dateTime: `${normalizedNewDate}T${slot.end_time}:00+08:00`, timeZone: 'Asia/Manila' },
+                },
+              } as any);
+            }
+          } catch (calErr: any) {
+            console.error('Google Calendar bulk update error:', calErr.message);
+          }
+        }
+      }
+
+      const createdSlots = [];
+
+      if (parsedExtraGroups > 0) {
+        const distinctCourseIds = Array.from(new Set(slotsResult.rows.map((s: any) => s.course_id)));
+        if (distinctCourseIds.length !== 1) {
+          return res.status(400).json({
+            error: 'Cannot add extra groups on a day containing multiple courses.',
+          });
+        }
+
+        const courseId = distinctCourseIds[0];
+        const dayEndMinute = 17 * 60;
+        const lunchStartMinute = 12 * 60;
+        const lunchEndMinute = 13 * 60 + 30;
+        const breakMinutes = 10;
+        const slotMinutes = 60;
+
+        const lastEndMinute = slotsResult.rows.reduce((max: number, slot: any) => {
+          const endMinute = parseTimeToMinutes(slot.end_time);
+          return Math.max(max, endMinute);
+        }, 8 * 60);
+
+        let currentStartMinute = Math.max(lastEndMinute + breakMinutes, 8 * 60);
+
+        const ownerTokenResult = await pool.query(
+          'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+          [user.id]
+        );
+        const ownerAccessToken = ownerTokenResult.rows[0]?.googleAccessToken;
+        const calendar = ownerAccessToken ? getCalendarClient(ownerAccessToken) : null;
+
+        for (let i = 0; i < parsedExtraGroups; i++) {
+          if (currentStartMinute >= lunchStartMinute && currentStartMinute < lunchEndMinute) {
+            currentStartMinute = lunchEndMinute;
+          }
+
+          let currentEndMinute = currentStartMinute + slotMinutes;
+
+          // Prevent automatically created extra slots from overlapping lunch break.
+          if (currentStartMinute < lunchStartMinute && currentEndMinute > lunchStartMinute) {
+            currentStartMinute = lunchEndMinute;
+            currentEndMinute = currentStartMinute + slotMinutes;
+          }
+
+          if (currentEndMinute > dayEndMinute) {
+            return res.status(400).json({
+              error: `Only ${i} extra group slot(s) can fit in the day with 1-hour slots and 10-minute breaks.`,
+            });
+          }
+
+          const startTime = formatMinutesToTime(currentStartMinute);
+          const endTime = formatMinutesToTime(currentEndMinute);
+
+          const inserted = await pool.query(
+            `INSERT INTO ss_consultation_slots
+             (course_id, owner_account_id, owner_role, slot_date, start_time, end_time, slot_type, max_groups, allowed_group_id)
+             VALUES ($1, $2, $3, $4, $5, $6, 'FIRST_COME_FIRST_SERVE', 1, NULL)
+             RETURNING *`,
+            [courseId, user.id, user.role, normalizedNewDate, startTime, endTime]
+          );
+
+          const createdSlot = inserted.rows[0];
+
+          if (calendar) {
+            try {
+              const event = await calendar.events.insert({
+                calendarId: 'primary',
+                resource: {
+                  summary: 'Consultation - FCFS',
+                  description: 'Consultation slot - FCFS (extra group slot)',
+                  start: { dateTime: `${normalizedNewDate}T${startTime}:00+08:00`, timeZone: 'Asia/Manila' },
+                  end: { dateTime: `${normalizedNewDate}T${endTime}:00+08:00`, timeZone: 'Asia/Manila' },
+                },
+              } as any);
+
+              if (event?.data?.id) {
+                await pool.query(
+                  'UPDATE ss_consultation_slots SET google_event_id = $1 WHERE slot_id = $2',
+                  [event.data.id, createdSlot.slot_id]
+                );
+                createdSlot.google_event_id = event.data.id;
+              }
+            } catch (calErr: any) {
+              console.error('Google Calendar extra slot create error:', calErr.message);
+            }
+          }
+
+          createdSlots.push(createdSlot);
+          currentStartMinute = currentEndMinute + breakMinutes;
+        }
+      }
+
+      return res.json({ success: true, updatedSlots, createdSlots });
+    } catch (err: any) {
+      console.error('Error updating day consultation slots:', err.message);
+      return res.status(500).json({ error: 'Failed to update day consultation slots.' });
+    }
+  });
+});
+
+// DELETE /api/consultation/slots/day/:slotDate — Adviser/Admin deletes all owned slots on a day
+app.delete('/api/consultation/slots/day/:slotDate', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotDate } = req.params;
+      const normalizedSlotDate = String(slotDate || '').split('T')[0];
+
+      const slotsResult = await pool.query(
+        `SELECT slot_id, owner_account_id, google_event_id
+         FROM ss_consultation_slots
+         WHERE owner_account_id = $1 AND slot_date::date = $2::date`,
+        [user.id, normalizedSlotDate]
+      );
+
+      if (slotsResult.rows.length === 0) {
+        return res.status(404).json({ error: 'No consultation slots found for this date.' });
+      }
+
+      for (const slot of slotsResult.rows) {
+        if (slot.google_event_id) {
+          try {
+            const ownerTokenResult = await pool.query(
+              'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+              [slot.owner_account_id]
+            );
+
+            const ownerAccessToken = ownerTokenResult.rows[0]?.googleAccessToken;
+            if (ownerAccessToken) {
+              const calendar = getCalendarClient(ownerAccessToken);
+              await calendar.events.delete({
+                calendarId: 'primary',
+                eventId: slot.google_event_id,
+              } as any);
+            }
+          } catch (calErr: any) {
+            console.error('Google Calendar bulk delete error:', calErr.message);
+          }
+        }
+      }
+
+      await pool.query(
+        'DELETE FROM ss_consultation_slots WHERE owner_account_id = $1 AND slot_date::date = $2::date',
+        [user.id, normalizedSlotDate]
+      );
+
+      return res.json({ success: true, deletedCount: slotsResult.rows.length });
+    } catch (err: any) {
+      console.error('Error deleting day consultation slots:', err.message);
+      return res.status(500).json({ error: 'Failed to delete day consultation slots.' });
+    }
+  });
+});
+
+// POST /api/consultation/bookings — Group books a consultation slot
+app.post('/api/consultation/bookings', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err) return res.sendStatus(403);
+
+    try {
+      const { slotId, groupId, groupName, courseId } = req.body;
+      const requesterEmail = String(user?.email || user?.accountEmail || '').trim().toLowerCase();
+
+      await pool.query(
+        `CREATE TABLE IF NOT EXISTS public.ss_consultation_slot_groups (
+          id serial PRIMARY KEY,
+          slot_id integer NOT NULL UNIQUE REFERENCES public.ss_consultation_slots(slot_id) ON DELETE CASCADE,
+          group_ref text,
+          group_name text NOT NULL,
+          created_at timestamp with time zone NOT NULL DEFAULT now()
+        )`
+      );
+
+      if (!slotId || !courseId || (!groupId && !groupName)) {
+        return res.status(400).json({ error: 'Missing required fields.' });
+      }
+
+      if (!requesterEmail) {
+        return res.status(403).json({ error: 'Unable to verify booking permissions.' });
+      }
+
+      // Enforce booking permission from team_group_members: only member_number 1 or 2 can book.
+      let normalizedGroupName = String(groupName || '').trim().toLowerCase();
+      const membershipResult = await pool.query(
+        `SELECT
+            tg.id AS group_id,
+            tg.name AS group_name,
+            tgm.member_number
+         FROM team_group_members tgm
+         JOIN team_groups tg ON tg.id = tgm.team_group_id
+         WHERE lower(trim(tgm.email)) = $1
+           AND (tg.id::text = $2 OR lower(trim(tg.name)) = $3)
+         LIMIT 1`,
+        [requesterEmail, String(groupId), normalizedGroupName]
+      );
+
+      if (membershipResult.rows.length === 0) {
+        return res.status(403).json({ error: 'You are not part of a valid group for booking.' });
+      }
+
+      const requesterMemberNumber = Number(membershipResult.rows[0].member_number);
+      const isAllowedBooker = requesterMemberNumber === 1 || requesterMemberNumber === 2;
+
+      if (!normalizedGroupName) {
+        normalizedGroupName = String(membershipResult.rows[0].group_name || '').trim().toLowerCase();
+      }
+
+      if (!isAllowedBooker) {
+        return res.status(403).json({ error: 'Only member #1 or member #2 can book consultations.' });
+      }
+
+      let bookingGroupId = Number(groupId);
+      if (!Number.isFinite(bookingGroupId)) {
+        const legacyGroupResult = await pool.query(
+          `SELECT "smallgroupID" AS "smallgroupID"
+           FROM ss_group
+           WHERE lower(trim("groupName")) = lower(trim($1))
+           LIMIT 1`,
+          [normalizedGroupName]
+        );
+
+        if (legacyGroupResult.rows.length === 0) {
+          const ensuredGroupId = await ensureLegacyGroupIdFromTeamGroup(String(membershipResult.rows[0].group_id));
+          bookingGroupId = Number(ensuredGroupId);
+        } else {
+          bookingGroupId = Number(legacyGroupResult.rows[0].smallgroupID);
+        }
+
+        if (!Number.isFinite(bookingGroupId)) {
+          return res.status(400).json({ error: 'Invalid numeric group id for booking.' });
+        }
+      }
+
+      // Get slot details
+      const slotResult = await pool.query(
+        'SELECT * FROM ss_consultation_slots WHERE slot_id = $1',
+        [slotId]
+      );
+
+      if (slotResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Slot not found.' });
+      }
+
+      const slot = slotResult.rows[0];
+
+      // Check if group can book (FCFS - check max groups, or SPECIFIC - check if allowed)
+      if (slot.slot_type === 'FIRST_COME_FIRST_SERVE') {
+        const bookingCountResult = await pool.query(
+          'SELECT COUNT(*) as count FROM ss_consultation_bookings WHERE slot_id = $1 AND status = $2',
+          [slotId, 'BOOKED']
+        );
+
+        const currentCount = parseInt(bookingCountResult.rows[0].count);
+        if (currentCount >= slot.max_groups) {
+          return res.status(400).json({ error: 'This slot is fully booked.' });
+        }
+      } else if (slot.slot_type === 'SPECIFIC_GROUP') {
+        const reservedGroupResult = await pool.query(
+          'SELECT group_ref, group_name FROM ss_consultation_slot_groups WHERE slot_id = $1',
+          [slotId]
+        );
+
+        if (reservedGroupResult.rows.length > 0) {
+          const reserved = reservedGroupResult.rows[0];
+          const allowedByRef = reserved.group_ref && String(reserved.group_ref) === String(groupId);
+          const allowedByName = reserved.group_name && groupName && String(reserved.group_name).trim().toLowerCase() === String(groupName).trim().toLowerCase();
+          const isReservedGroup = !!allowedByRef || !!allowedByName;
+
+          if (isReservedGroup) {
+            return res.status(200).json({
+              booking: null,
+              message: 'This reserved group is already confirmed for the slot.',
+            });
+          }
+
+          if (slot.max_groups > 1) {
+            // 1 seat is consumed by the reserved group, remaining seats are FCFS.
+            const bookingCountResult = await pool.query(
+              'SELECT COUNT(*) as count FROM ss_consultation_bookings WHERE slot_id = $1 AND status = $2',
+              [slotId, 'BOOKED']
+            );
+
+            const currentCount = parseInt(bookingCountResult.rows[0].count);
+            const remainingFcfsSeats = Math.max(0, Number(slot.max_groups) - 1);
+
+            if (currentCount >= remainingFcfsSeats) {
+              return res.status(400).json({ error: 'This slot is fully booked.' });
+            }
+          } else {
+            return res.status(400).json({
+              error: `This slot is reserved for ${reserved.group_name}.`,
+            });
+          }
+        } else if (slot.allowed_group_id != null && slot.allowed_group_id != groupId) {
+          return res.status(400).json({ error: 'This slot is reserved for a specific group.' });
+        }
+      }
+
+      // Check if group already booked this week
+      const startOfWeek = new Date();
+      startOfWeek.setDate(startOfWeek.getDate() - startOfWeek.getDay());
+      startOfWeek.setHours(0, 0, 0, 0);
+
+      const existingBookingResult = await pool.query(
+        `SELECT COUNT(*) as count FROM ss_consultation_bookings cb
+         JOIN ss_consultation_slots cs ON cb.slot_id = cs.slot_id
+         WHERE cb.group_id = $1 AND cs.course_id = $2 AND cs.slot_date >= $3 AND cb.status = $4`,
+        [bookingGroupId, courseId, startOfWeek.toISOString().split('T')[0], 'BOOKED']
+      );
+
+      if (parseInt(existingBookingResult.rows[0].count) > 0) {
+        return res.status(400).json({ error: 'Group has already booked a consultation this week.' });
+      }
+
+      // Create booking
+      const bookingResult = await pool.query(
+        `INSERT INTO ss_consultation_bookings 
+         (slot_id, course_id, group_id, group_name, booked_by_email, status)
+         VALUES ($1, $2, $3, $4, $5, $6)
+         RETURNING *`,
+        [slotId, courseId, bookingGroupId, groupName, user.email, 'BOOKED']
+      );
+
+      const booking = bookingResult.rows[0];
+
+      // Update Google Calendar event to show booking
+      try {
+        const { rows } = await pool.query(
+          'SELECT "googleAccessToken" FROM ss_account WHERE account_id = $1',
+          [slot.owner_account_id]
+        );
+
+        if (rows[0]?.googleAccessToken && slot.google_event_id) {
+          const calendar = getCalendarClient(rows[0].googleAccessToken);
+          
+          const bookingCountResult = await pool.query(
+            'SELECT COUNT(*) as count FROM ss_consultation_bookings WHERE slot_id = $1 AND status = $2',
+            [slotId, 'BOOKED']
+          );
+
+          const newDescription = `Consultation slot\nBookings: ${bookingCountResult.rows[0].count}/${slot.max_groups}`;
+          
+          await calendar.events.update({
+            calendarId: 'primary',
+            eventId: slot.google_event_id,
+            resource: { description: newDescription },
+          } as any);
+        }
+      } catch (calErr: any) {
+        console.error('Google Calendar update error:', calErr.message);
+      }
+
+      return res.json({ booking });
+    } catch (err: any) {
+      console.error('Error creating booking:', err.message);
+      return res.status(500).json({ error: 'Failed to create booking.' });
+    }
+  });
+});
+
+// GET /api/consultation/bookings/group/:groupId — Get group's bookings
+app.get('/api/consultation/bookings/group/:groupId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err) return res.sendStatus(403);
+
+    try {
+      const { groupId } = req.params;
+
+      const { rows } = await pool.query(
+        `SELECT 
+          cb.*,
+          cs.slot_date,
+          cs.start_time,
+          cs.end_time,
+          sa."accountName" as adviser_name,
+          sc."courseName"
+        FROM ss_consultation_bookings cb
+        JOIN ss_consultation_slots cs ON cb.slot_id = cs.slot_id
+        JOIN ss_account sa ON cs.owner_account_id = sa.account_id
+        JOIN ss_courses sc ON cb.course_id = sc.id
+        WHERE cb.group_id = $1
+        ORDER BY cs.slot_date DESC`,
+        [groupId]
+      );
+
+      return res.json({ bookings: rows });
+    } catch (err: any) {
+      console.error('Error fetching group bookings:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch bookings.' });
+    }
+  });
+});
+
+// GET /api/consultation/bookings/slot/:slotId — Get bookings for a specific slot (adviser/admin)
+app.get('/api/consultation/bookings/slot/:slotId', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotId } = req.params;
+
+      const slotResult = await pool.query(
+        'SELECT owner_account_id FROM ss_consultation_slots WHERE slot_id = $1',
+        [slotId]
+      );
+
+      if (slotResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Slot not found.' });
+      }
+
+      if (user.role !== 'Admin' && user.id != slotResult.rows[0].owner_account_id) {
+        return res.sendStatus(403);
+      }
+
+      const { rows } = await pool.query(
+        `SELECT 
+          cb.*,
+          cs.slot_date,
+          cs.start_time,
+          cs.end_time,
+          sa."accountName" as adviser_name,
+          sc."courseName"
+        FROM ss_consultation_bookings cb
+        JOIN ss_consultation_slots cs ON cb.slot_id = cs.slot_id
+        JOIN ss_account sa ON cs.owner_account_id = sa.account_id
+        JOIN ss_courses sc ON cb.course_id = sc.id
+        WHERE cb.slot_id = $1
+        ORDER BY cb.created_at DESC`,
+        [slotId]
+      );
+
+      return res.json({ bookings: rows });
+    } catch (err: any) {
+      console.error('Error fetching slot bookings:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch slot bookings.' });
+    }
+  });
+});
+
+// POST /api/consultation/feedback — Adviser submits consultation feedback
+// Uses new normalized columns: adviser_notes, attendance_data, participation_data, status
+// Legacy journal entries use old columns: conDate, conType, conMil, conSum, conAction, conAtt, isDraft, conStat, conNotes
+app.post('/api/consultation/feedback', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const {
+        booking_id,
+        slot_id,
+        group_id,
+        group_name,
+        adviser_notes,
+        conDate,
+        conMil,
+        conSum,
+        conAction,
+        conConcerns,
+        attendance_data,
+        participation_data
+      } = req.body;
+
+      if (!slot_id || (!group_id && !group_name && !booking_id)) {
+        return res.status(400).json({ error: 'Missing required fields.' });
+      }
+
+      let resolvedGroupName: string | null = null;
+
+      // Primary: resolve by UUID group_id when provided.
+      if (group_id) {
+        const groupResult = await pool.query(
+          `SELECT name as "groupName" FROM team_groups WHERE id::text = $1`,
+          [String(group_id)]
+        );
+        if (groupResult.rows.length > 0) {
+          resolvedGroupName = groupResult.rows[0].groupName;
+        }
+      }
+
+      // Fallback: provided group_name from UI payload.
+      if (!resolvedGroupName && group_name) {
+        resolvedGroupName = String(group_name).trim();
+      }
+
+      // Fallback: resolve from booking row.
+      if (!resolvedGroupName && booking_id) {
+        const bookingGroup = await pool.query(
+          `SELECT group_name FROM ss_consultation_bookings WHERE booking_id = $1`,
+          [booking_id]
+        );
+        if (bookingGroup.rows.length > 0) {
+          resolvedGroupName = bookingGroup.rows[0].group_name;
+        }
+      }
+
+      // Fallback: specific-group slot mapping.
+      if (!resolvedGroupName) {
+        const slotGroup = await pool.query(
+          `SELECT group_name FROM ss_consultation_slot_groups WHERE slot_id = $1`,
+          [slot_id]
+        );
+        if (slotGroup.rows.length > 0) {
+          resolvedGroupName = slotGroup.rows[0].group_name;
+        }
+      }
+
+      if (!resolvedGroupName) {
+        return res.status(404).json({ error: 'Group not found.' });
+      }
+
+      const groupName = resolvedGroupName;
+
+      // Get course_id from slot
+      const slotResult = await pool.query(
+        `SELECT course_id FROM ss_consultation_slots WHERE slot_id = $1`,
+        [slot_id]
+      );
+
+      if (slotResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Consultation slot not found.' });
+      }
+
+      const courseId = slotResult.rows[0].course_id;
+
+      // Always insert a new consultation record so history can keep multiple entries.
+      const consultationResult = await pool.query(
+        `INSERT INTO ss_consultation 
+         ("courseID", "groupName", "conDate", "conMil", "conSum", "conAction", "conConcerns", slot_id, adviser_notes, attendance_data, participation_data, status, submitted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, NOW())
+         RETURNING *`,
+        [
+          courseId,
+          groupName,
+          conDate || null,
+          conMil || null,
+          conSum || null,
+          conAction || null,
+          conConcerns || null,
+          slot_id,
+          adviser_notes || null,
+          JSON.stringify(attendance_data || {}),
+          JSON.stringify(participation_data || {}),
+          'SUBMITTED',
+        ]
+      );
+
+      const consultation = consultationResult.rows[0];
+
+      // Mark booking as completed after record submission so the slot is no longer active.
+      if (booking_id) {
+        await pool.query(
+          `UPDATE ss_consultation_bookings
+           SET status = $1,
+               updated_at = NOW()
+           WHERE booking_id = $2`,
+          ['COMPLETED', booking_id]
+        );
+      }
+
+      // Remove slots that should not persist after submission (reserved/single-capacity slots)
+      // once there are no active BOOKED entries left.
+      const slotMetaResult = await pool.query(
+        `SELECT slot_type, COALESCE(max_groups, 1) AS max_groups
+         FROM ss_consultation_slots
+         WHERE slot_id = $1`,
+        [slot_id]
+      );
+
+      if (slotMetaResult.rows.length > 0) {
+        const slotMeta = slotMetaResult.rows[0];
+        const activeBookingsResult = await pool.query(
+          `SELECT COUNT(*)::int AS count
+           FROM ss_consultation_bookings
+           WHERE slot_id = $1 AND status = $2`,
+          [slot_id, 'BOOKED']
+        );
+
+        const activeBookings = Number(activeBookingsResult.rows[0]?.count || 0);
+        const maxGroups = Number(slotMeta.max_groups || 1);
+        const shouldRemoveSlot =
+          activeBookings === 0 &&
+          (slotMeta.slot_type === 'SPECIFIC_GROUP' || maxGroups <= 1);
+
+        if (shouldRemoveSlot) {
+          await pool.query(
+            `DELETE FROM ss_consultation_slots
+             WHERE slot_id = $1`,
+            [slot_id]
+          );
+        }
+      }
+
+      return res.json({ consultation });
+    } catch (err: any) {
+      console.error('Error submitting consultation feedback:', err.message);
+      return res.status(500).json({ error: 'Failed to submit consultation feedback.' });
+    }
+  });
+});
+
+// POST /api/consultation/:slotId/form — Adviser submits consultation form
+app.post('/api/consultation/:slotId/form', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { slotId } = req.params;
+      const { groupName, courseId, notes, attendanceData, participationData } = req.body;
+
+      if (!slotId || !groupName || !courseId) {
+        return res.status(400).json({ error: 'Missing required fields.' });
+      }
+
+      // Insert consultation record
+      const consultationResult = await pool.query(
+        `INSERT INTO ss_consultation 
+         ("courseID", "groupName", slot_id, adviser_notes, attendance_data, participation_data, status, submitted_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())
+         RETURNING *`,
+        [courseId, groupName, slotId, notes, JSON.stringify(attendanceData || {}), JSON.stringify(participationData || {}), 'SUBMITTED']
+      );
+
+      const consultation = consultationResult.rows[0];
+
+      return res.json({ consultation });
+    } catch (err: any) {
+      console.error('Error submitting consultation form:', err.message);
+      return res.status(500).json({ error: 'Failed to submit consultation form.' });
+    }
+  });
+});
+
+// GET /api/consultation/group/:groupId/logs — Get group's consultation logs
+// Returns both new booking feedback (status=SUBMITTED) and legacy journal entries (if status is populated)
+app.get('/api/consultation/group/:groupId/logs', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err) return res.sendStatus(403);
+
+    try {
+      const { groupId } = req.params;
+
+      // Get group name from team_groups using the groupId (UUID)
+      const groupResult = await pool.query(
+        `SELECT name FROM team_groups WHERE id = $1`,
+        [groupId]
+      );
+
+      if (groupResult.rows.length === 0) {
+        return res.json({ logs: [] });
+      }
+
+      const groupName = groupResult.rows[0].name;
+
+      // Find all submitted consultations for this group
+      const { rows } = await pool.query(
+        `SELECT 
+          c.*,
+          cs.slot_date,
+          cs.start_time,
+          sa."accountName" as adviser_name
+        FROM ss_consultation c
+        LEFT JOIN ss_consultation_slots cs ON c.slot_id = cs.slot_id
+        LEFT JOIN ss_account sa ON cs.owner_account_id = sa.account_id
+        WHERE lower(trim(c."groupName")) = lower(trim($1))
+        AND c.status = 'SUBMITTED'
+        AND c.submitted_at IS NOT NULL
+        ORDER BY c.submitted_at DESC`,
+        [groupName]
+      );
+
+      return res.json({ logs: rows });
+    } catch (err: any) {
+      console.error('Error fetching consultation logs:', err.message);
+      return res.status(500).json({ error: 'Failed to fetch consultation logs.' });
+    }
+  });
+});
+
+// PUT /api/consultation/bookings/:bookingId/reschedule — Adviser reschedules a booking
+app.put('/api/consultation/bookings/:bookingId/reschedule', async (req, res) => {
+  const token = req.headers.authorization?.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  jwt.verify(token, process.env.JWT_SECRET || "test", async (err: any, user: any) => {
+    if (err || (user.role !== 'Adviser' && user.role !== 'Admin')) return res.sendStatus(403);
+
+    try {
+      const { bookingId } = req.params;
+      const { newSlotId } = req.body;
+
+      if (!newSlotId) {
+        return res.status(400).json({ error: 'New slot ID is required.' });
+      }
+
+      // Get original booking
+      const bookingResult = await pool.query(
+        'SELECT * FROM ss_consultation_bookings WHERE booking_id = $1',
+        [bookingId]
+      );
+
+      if (bookingResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Booking not found.' });
+      }
+
+      const booking = bookingResult.rows[0];
+
+      // Update booking to new slot
+      const updatedResult = await pool.query(
+        'UPDATE ss_consultation_bookings SET slot_id = $1, status = $2, updated_at = NOW() WHERE booking_id = $3 RETURNING *',
+        [newSlotId, 'RESCHEDULED', bookingId]
+      );
+
+      return res.json({ booking: updatedResult.rows[0] });
+    } catch (err: any) {
+      console.error('Error rescheduling booking:', err.message);
+      return res.status(500).json({ error: 'Failed to reschedule booking.' });
+    }
+  });
 });
 
 const PORT = process.env.PORT || 5000;

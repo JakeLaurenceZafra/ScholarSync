@@ -103,6 +103,19 @@ function getStartOfWeek(date: Date): Date {
   return d
 }
 
+function getEventStartDate(event: CalendarEvent): Date | null {
+  if (event.start?.dateTime) {
+    const parsed = new Date(event.start.dateTime)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
+  }
+  if (event.start?.date) {
+    const [y, m, d] = event.start.date.split("-").map(Number)
+    if (!y || !m || !d) return null
+    return new Date(y, m - 1, d, 0, 0, 0, 0)
+  }
+  return null
+}
+
 // ─────────────────────────────────────────────
 //  Main Component
 // ─────────────────────────────────────────────
@@ -119,6 +132,7 @@ export default function CalendarPage() {
   const [deletingEventId, setDeletingEventId] = useState<string | null>(null)
   const [formError, setFormError] = useState("")
   const [isSaving, setIsSaving] = useState(false)
+  const [calendarWarning, setCalendarWarning] = useState("")
 
   const blankForm = (): EventFormData => ({
     title: "",
@@ -159,8 +173,16 @@ export default function CalendarPage() {
       if (!res.ok) throw new Error()
       const data = await res.json()
       setEvents(data.events || [])
+      if (data.calendarStatus && !data.calendarStatus.googleFetchOk) {
+        setCalendarWarning(
+          data.calendarStatus.googleError || "Google Calendar connection issue detected."
+        )
+      } else {
+        setCalendarWarning("")
+      }
     } catch {
       setEvents([])
+      setCalendarWarning("Failed to load calendar data.")
     } finally {
       setLoading(false)
     }
@@ -171,7 +193,12 @@ export default function CalendarPage() {
     setEditingEvent(null)
     setFormError("")
     const base = date ?? new Date()
-    base.setMinutes(0, 0, 0)
+    if (!date) {
+      // Default to the next full hour so new events don't start in the past.
+      base.setHours(base.getHours() + 1, 0, 0, 0)
+    } else {
+      base.setMinutes(0, 0, 0)
+    }
     const end = new Date(base.getTime() + 60 * 60 * 1000)
     setFormData({
       ...blankForm(),
@@ -281,7 +308,8 @@ export default function CalendarPage() {
   // ── Computed ──
   const getEventsForDate = (date: Date) =>
     events.filter((ev) => {
-      const d = new Date(ev.start.dateTime || ev.start.date + "T00:00" || "")
+      const d = getEventStartDate(ev)
+      if (!d) return false
       return sameDay(d, date)
     })
 
@@ -343,8 +371,18 @@ export default function CalendarPage() {
 
   // ── Upcoming sidebar ──
   const upcomingEvents = events
-    .filter((e) => new Date(e.start.dateTime || e.start.date + "T00:00" || "") >= today)
-    .sort((a, b) => new Date(a.start.dateTime || a.start.date + "T00:00" || "").getTime() - new Date(b.start.dateTime || b.start.date + "T00:00" || "").getTime())
+    .filter((e) => {
+      const d = getEventStartDate(e)
+      return d ? d >= today : false
+    })
+    .sort((a, b) => {
+      const aDate = getEventStartDate(a)
+      const bDate = getEventStartDate(b)
+      if (!aDate && !bDate) return 0
+      if (!aDate) return 1
+      if (!bDate) return -1
+      return aDate.getTime() - bDate.getTime()
+    })
     .slice(0, 8)
 
   if (!user) {
@@ -377,6 +415,15 @@ export default function CalendarPage() {
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+
+          {calendarWarning && (
+            <div className="lg:col-span-3 p-3 bg-amber-100 border border-amber-300 text-amber-800 rounded-xl text-sm flex items-start gap-2">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span>
+                Google Calendar issue: {calendarWarning}. Consultation fallback events may still appear.
+              </span>
+            </div>
+          )}
 
           {/* ── Main Calendar Panel ── */}
           <div className="lg:col-span-2 space-y-4">
@@ -677,7 +724,7 @@ export default function CalendarPage() {
                     <div className="flex items-center gap-2 text-sm text-gray-600">
                       <Clock className="w-4 h-4 text-blue-400 shrink-0" />
                       <div>
-                        <div>{formatDateLabel(new Date(selectedEvent.start.dateTime || selectedEvent.start.date + "T00:00" || ""))}</div>
+                        <div>{formatDateLabel(getEventStartDate(selectedEvent) || new Date())}</div>
                         <div className="text-xs text-gray-400">
                           {selectedEvent.start.dateTime
                             ? `${formatTime(selectedEvent.start.dateTime)} – ${formatTime(selectedEvent.end.dateTime)}`
@@ -756,7 +803,7 @@ export default function CalendarPage() {
                         >
                           <p className={`text-sm font-semibold truncate ${col.text}`}>{ev.summary}</p>
                           <p className={`text-xs mt-0.5 ${col.text} opacity-70`}>
-                            {formatDateLabel(new Date(ev.start.dateTime || ev.start.date + "T00:00" || ""))} • {formatTime(ev.start.dateTime, !ev.start.dateTime)}
+                            {formatDateLabel(getEventStartDate(ev) || new Date())} • {formatTime(ev.start.dateTime, !ev.start.dateTime)}
                           </p>
                           {ev.location && (
                             <p className={`text-xs mt-0.5 flex items-center gap-1 ${col.text} opacity-60`}>
