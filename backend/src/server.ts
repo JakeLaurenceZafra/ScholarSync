@@ -204,7 +204,7 @@ const verifyInstructor = (req: express.Request, res: express.Response, next: exp
 
   jwt.verify(token, process.env.JWT_SECRET || "test", (err: any, user: any) => {
     if (err) return res.sendStatus(403);
-    if (user.role !== 'Admin' && user.role !== 'Advisers') {
+    if (user.role !== 'Admin' && user.role !== 'Adviser') {
       return res.status(403).json({ error: "Instructor access required" });
     }
     (req as any).user = user;
@@ -223,8 +223,8 @@ app.get('/api/courses', async (req, res) => {
     const enrollRes = await pool.query('SELECT course_id FROM ss_enrollments WHERE account_id = $1', [user.id]);
     const enrolledCourseIds = enrollRes.rows.map(e => e.course_id);
 
-    if (user.role === 'Admin' || user.role === 'Advisers') {
-      // Admin/Advisers see ALL courses
+    if (user.role === 'Admin' || user.role === 'Adviser') {
+      // Admin/Adviser see ALL courses
       const { rows: allCourses } = await pool.query('SELECT * FROM ss_courses ORDER BY id DESC');
       return res.json(allCourses);
     }

@@ -7,7 +7,7 @@ import AIResultModal from '@/components/AIResultModal';
 import { useAIStore } from '@/store/ai.store';
 import axios from 'axios';
 import { jwtDecode } from 'jwt-decode';
-import { Sparkles, TrendingUp } from 'lucide-react';
+import { Sparkles, TrendingUp, ChevronDown } from 'lucide-react';
 
 type Group = {
     smallgroupID: number;
@@ -39,7 +39,9 @@ export default function GroupPage() {
     const [group, setGroup] = useState<Group | null>(null);
     const [tasks, setTasks] = useState<Task[]>([]);
     const [journals, setJournals] = useState<any[]>([]);
-    const [activeTab, setActiveTab] = useState<'tasks' | 'journals'>('tasks');
+    const [consultationLogs, setConsultationLogs] = useState<any[]>([]);
+    const [expandedConsultationId, setExpandedConsultationId] = useState<number | null>(null);
+    const [activeTab, setActiveTab] = useState<'tasks' | 'journals' | 'discussion' | 'consultations'>('tasks');
     const [selectedJournal, setSelectedJournal] = useState<any | null>(null);
     const { generate } = useAIStore();
     const [showAIModal, setShowAIModal] = useState(false);
@@ -61,6 +63,20 @@ export default function GroupPage() {
     const [taskInfo, setTaskInfo] = useState('');
     const [creatingTask, setCreatingTask] = useState(false);
 
+    const formatDateLabel = (value: any) => {
+        if (!value) return 'No date';
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return String(value);
+        return parsed.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
+    };
+
+    const formatDateTimeLabel = (value: any) => {
+        if (!value) return '-';
+        const parsed = new Date(value);
+        if (Number.isNaN(parsed.getTime())) return String(value);
+        return parsed.toLocaleString();
+    };
+
     const fetchGroupData = async (token: string) => {
         try {
             console.log("DEBUG: fetchGroupData for groupId:", groupId);
@@ -78,6 +94,15 @@ export default function GroupPage() {
                 c.groupName?.trim().toLowerCase() === currentGroupName && !c.isDraft
             );
             setJournals(groupJournals);
+
+            // Fetch consultation logs
+            try {
+                const logsRes = await axios.get(`http://localhost:5000/api/consultation/group/${groupId}/logs`, { headers: { Authorization: `Bearer ${token}` } });
+                setConsultationLogs(logsRes.data?.logs || []);
+            } catch (logErr: any) {
+                console.error("Error fetching consultation logs:", logErr);
+                setConsultationLogs([]);
+            }
         } catch (err: any) {
             console.error("Fetch Group Error:", err);
             setError(`Failed to load group details: ${err.message}. Backend: ${err.response?.data?.error || 'None'}`);
@@ -294,7 +319,7 @@ export default function GroupPage() {
                         <div className="lg:col-span-2 bg-white rounded-xl shadow-sm border border-gray-100 overflow-hidden flex flex-col min-h-[400px]">
                             
                             <div className="bg-[#0095FF] flex justify-between items-center px-4 w-full">
-                                <div className="flex items-center pt-2">
+                                <div className="flex items-center pt-2 flex-wrap">
                                     <button 
                                         onClick={() => setActiveTab('tasks')}
                                         className={`px-4 py-2 font-bold transition-colors ${activeTab === 'tasks' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
@@ -306,6 +331,18 @@ export default function GroupPage() {
                                         className={`px-4 py-2 font-bold transition-colors ${activeTab === 'journals' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
                                     >
                                         Journals
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('discussion')}
+                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'discussion' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
+                                    >
+                                        Discussion
+                                    </button>
+                                    <button 
+                                        onClick={() => setActiveTab('consultations')}
+                                        className={`px-4 py-2 font-bold transition-colors ${activeTab === 'consultations' ? 'text-[#0095FF] bg-white rounded-t-lg' : 'text-white/80 hover:text-white'}`}
+                                    >
+                                        Consultation History
                                     </button>
                                 </div>
                                 {activeTab === 'tasks' && canCreateTasks && (
@@ -396,6 +433,171 @@ export default function GroupPage() {
                                             </div>
                                             <p className="font-medium">No journals published for this group.</p>
                                             <p className="text-xs text-center max-w-[200px] mt-2">Publish consultations from the Adviser dashboard to see them here.</p>
+                                        </div>
+                                    )
+                                )}
+
+                                {activeTab === 'discussion' && (
+                                    <div className="h-full flex flex-col items-center justify-center text-gray-400 py-12">
+                                        <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M7 8h10M7 12h4m1 8l-4-4H5a2 2 0 01-2-2V6a2 2 0 012-2h14a2 2 0 012 2v8a2 2 0 01-2 2h-3l-4 4z" />
+                                        </svg>
+                                        <p className="font-medium">Discussion board coming soon</p>
+                                        <p className="text-xs text-center max-w-[200px] mt-2">Group members can discuss project progress here.</p>
+                                    </div>
+                                )}
+
+                                {activeTab === 'consultations' && (
+                                    consultationLogs.length > 0 ? (
+                                        <div className="grid gap-4">
+                                            {consultationLogs.map((log) => (
+                                                <div key={log.conID} className="bg-gray-50 border border-gray-200 rounded-lg hover:shadow-md transition-shadow overflow-hidden">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setExpandedConsultationId(expandedConsultationId === log.conID ? null : log.conID)}
+                                                        className="w-full p-5 flex items-start justify-between gap-4 text-left"
+                                                    >
+                                                        <div>
+                                                            <p className="font-bold text-gray-800">
+                                                                Consultation with {log.adviser_name || 'Adviser'}
+                                                            </p>
+                                                            <p className="text-sm text-gray-600">
+                                                                {formatDateLabel(log.conDate || log.slot_date)}
+                                                                {log.start_time ? ` at ${log.start_time}` : ''}
+                                                            </p>
+                                                            {log.conMil && (
+                                                                <p className="text-xs text-gray-500 mt-1">Topic: {log.conMil}</p>
+                                                            )}
+                                                        </div>
+                                                        <div className="flex items-center gap-3">
+                                                            <span className={`text-xs font-bold px-2 py-1 rounded-full ${
+                                                                log.status === 'SUBMITTED'
+                                                                    ? 'bg-green-100 text-green-700'
+                                                                    : log.status === 'DRAFT'
+                                                                        ? 'bg-amber-100 text-amber-700'
+                                                                        : 'bg-blue-100 text-blue-700'
+                                                            }`}>
+                                                                {log.status || 'Unknown'}
+                                                            </span>
+                                                            <ChevronDown
+                                                                className={`w-4 h-4 text-gray-500 transition-transform ${expandedConsultationId === log.conID ? 'rotate-180' : ''}`}
+                                                            />
+                                                        </div>
+                                                    </button>
+
+                                                    {expandedConsultationId === log.conID && (
+                                                        <div className="px-5 pb-5 border-t border-gray-200">
+                                                            <div className="mt-4 grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Consultation Date</p>
+                                                                    <p className="text-gray-700">{log.conDate || '-'}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Milestone/Topic</p>
+                                                                    <p className="text-gray-700">{log.conMil || '-'}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Group Name</p>
+                                                                    <p className="text-gray-700">{log.groupName || '-'}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Course ID</p>
+                                                                    <p className="text-gray-700">{log.courseID ?? '-'}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Slot ID</p>
+                                                                    <p className="text-gray-700">{log.slot_id ?? '-'}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Submitted At</p>
+                                                                    <p className="text-gray-700">{formatDateTimeLabel(log.submitted_at)}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Created At</p>
+                                                                    <p className="text-gray-700">{formatDateTimeLabel(log.created_at)}</p>
+                                                                </div>
+                                                                <div className="bg-white rounded border border-gray-200 p-3">
+                                                                    <p className="text-gray-500 font-bold uppercase tracking-wide mb-1">Updated At</p>
+                                                                    <p className="text-gray-700">{formatDateTimeLabel(log.updated_at)}</p>
+                                                                </div>
+                                                            </div>
+
+                                                            {log.conSum && (
+                                                                <div className="mt-4">
+                                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Summary</h4>
+                                                                    <p className="text-sm text-gray-700 bg-white p-3 rounded border border-gray-200 whitespace-pre-wrap">
+                                                                        {log.conSum}
+                                                                    </p>
+                                                                </div>
+                                                            )}
+
+                                                            {log.conAction && (
+                                                                <div className="mt-4">
+                                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Action Items</h4>
+                                                                    <p className="text-sm text-gray-700 bg-white p-3 rounded border border-gray-200 whitespace-pre-wrap">
+                                                                        {log.conAction}
+                                                                    </p>
+                                                                </div>
+                                                            )}
+
+                                                            {log.conConcerns && (
+                                                                <div className="mt-4">
+                                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Concerns</h4>
+                                                                    <p className="text-sm text-gray-700 bg-white p-3 rounded border border-gray-200 whitespace-pre-wrap">
+                                                                        {log.conConcerns}
+                                                                    </p>
+                                                                </div>
+                                                            )}
+
+                                                            {log.adviser_notes && (
+                                                                <div className="mt-4">
+                                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Adviser Notes</h4>
+                                                                    <p className="text-sm text-gray-700 bg-white p-3 rounded border border-gray-200 whitespace-pre-wrap">
+                                                                        {log.adviser_notes}
+                                                                    </p>
+                                                                </div>
+                                                            )}
+
+                                                            {log.attendance_data && Object.keys(log.attendance_data).length > 0 && (
+                                                                <div className="mt-4">
+                                                                    <h4 className="text-xs font-bold text-gray-500 uppercase tracking-wider mb-2">Attendance & Participation</h4>
+                                                                    <div className="grid grid-cols-1 sm:grid-cols-2 gap-2">
+                                                                        {Object.entries(log.attendance_data).map(([member, status]: [string, any], idx) => (
+                                                                            <div key={idx} className="text-xs p-2 bg-white rounded border border-gray-200">
+                                                                                <p className="font-semibold text-gray-800">{member}</p>
+                                                                                <div className="flex gap-2 mt-1 flex-wrap">
+                                                                                    <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                                                                        status === 'Present' ? 'bg-green-100 text-green-700' : 'bg-red-100 text-red-700'
+                                                                                    }`}>
+                                                                                        {status}
+                                                                                    </span>
+                                                                                    {log.participation_data?.[member] && (
+                                                                                        <span className={`text-[10px] font-bold px-2 py-0.5 rounded ${
+                                                                                            log.participation_data[member] === 'High' ? 'bg-blue-100 text-blue-700' :
+                                                                                            log.participation_data[member] === 'Moderate' ? 'bg-amber-100 text-amber-700' :
+                                                                                            'bg-gray-100 text-gray-700'
+                                                                                        }`}>
+                                                                                            {log.participation_data[member]}
+                                                                                        </span>
+                                                                                    )}
+                                                                                </div>
+                                                                            </div>
+                                                                        ))}
+                                                                    </div>
+                                                                </div>
+                                                            )}
+                                                        </div>
+                                                    )}
+                                                </div>
+                                            ))}
+                                        </div>
+                                    ) : (
+                                        <div className="h-full flex flex-col items-center justify-center text-gray-400 py-12">
+                                            <svg xmlns="http://www.w3.org/2000/svg" className="h-12 w-12 mb-2 opacity-50" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                                                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9 19v-6a2 2 0 00-2-2H5a2 2 0 00-2 2v6a2 2 0 002 2h2a2 2 0 002-2zm0 0V9a2 2 0 012-2h2a2 2 0 012 2v10m-6 0a2 2 0 002 2h2a2 2 0 002-2m0 0V5a2 2 0 012-2h2a2 2 0 012 2v14a2 2 0 01-2 2h-2a2 2 0 01-2-2z" />
+                                            </svg>
+                                            <p className="font-medium">No consultation logs yet</p>
+                                            <p className="text-xs text-center max-w-[200px] mt-2">Completed consultations with your adviser will appear here.</p>
                                         </div>
                                     )
                                 )}
