@@ -18,6 +18,7 @@ import {
     RefreshCw
 } from 'lucide-react';
 import { jwtDecode } from 'jwt-decode';
+import ThemeToggle from './shared/ThemeToggle';
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -219,13 +220,16 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                                 )}
                             </nav>
 
-                            <button 
-                                onClick={handleLogout} 
-                                className="flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all mt-auto"
-                            >
-                                <LogOut className="w-5 h-5" />
-                                <span>Sign Out</span>
-                            </button>
+                            <div className="mt-auto space-y-2">
+                                <ThemeToggle />
+                                <button 
+                                    onClick={handleLogout} 
+                                    className="flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all w-full"
+                                >
+                                    <LogOut className="w-5 h-5" />
+                                    <span>Sign Out</span>
+                                </button>
+                            </div>
                         </aside>
                     </div>
                 )}
