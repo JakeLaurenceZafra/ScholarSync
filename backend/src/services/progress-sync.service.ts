@@ -1,5 +1,4 @@
 import { Client } from 'pg';
-import logger from '../config/logger';
 
 interface ProgressUpdatePayload {
   group_id: string;
@@ -31,7 +30,7 @@ class ProgressSyncService {
    */
   async startListening() {
     if (this.isListening) {
-      logger.warn('Progress sync service already listening');
+      console.warn('⚠️ Progress sync service already listening');
       return;
     }
 
@@ -43,11 +42,11 @@ class ProgressSyncService {
       });
 
       await this.client.connect();
-      logger.info('✅ Progress sync service connected to database');
+      console.log('✅ Progress sync service connected to database');
 
       // Listen for progress_update notifications
       await this.client.query('LISTEN progress_update');
-      logger.info('🔔 Listening for progress updates from SkyFlow...');
+      console.log('🔔 Listening for progress updates from SkyFlow...');
 
       // Handle notifications
       this.client.on('notification', async (msg) => {
@@ -56,14 +55,14 @@ class ProgressSyncService {
             const payload: ProgressUpdatePayload = JSON.parse(msg.payload);
             await this.handleProgressUpdate(payload);
           } catch (error) {
-            logger.error('Error parsing progress update payload:', error);
+            console.error('❌ Error parsing progress update payload:', error);
           }
         }
       });
 
       // Handle connection errors
       this.client.on('error', (err) => {
-        logger.error('Progress sync client error:', err);
+        console.error('❌ Progress sync client error:', err);
         this.isListening = false;
         // Attempt to reconnect after 5 seconds
         setTimeout(() => this.startListening(), 5000);
@@ -71,7 +70,7 @@ class ProgressSyncService {
 
       this.isListening = true;
     } catch (error) {
-      logger.error('Failed to start progress sync service:', error);
+      console.error('❌ Failed to start progress sync service:', error);
       this.isListening = false;
       // Retry after 10 seconds
       setTimeout(() => this.startListening(), 10000);
@@ -82,7 +81,7 @@ class ProgressSyncService {
    * Handle incoming progress update from SkyFlow
    */
   private async handleProgressUpdate(payload: ProgressUpdatePayload) {
-    logger.info(`📊 Progress update received for group ${payload.group_id}: ${payload.progress}%`);
+    console.log(`📊 Progress update received for group ${payload.group_id}: ${payload.progress}%`);
 
     try {
       // Update team_groups table with new progress
@@ -104,7 +103,7 @@ class ProgressSyncService {
 
       if (result.rows.length > 0) {
         const updatedGroup = result.rows[0];
-        logger.info(`✅ Updated group "${updatedGroup.name}" progress to ${updatedGroup.progress}%`);
+        console.log(`✅ Updated group "${updatedGroup.name}" progress to ${updatedGroup.progress}%`);
 
         // Broadcast to all connected ScholarSync clients via Socket.io
         if (this.io) {
@@ -115,15 +114,15 @@ class ProgressSyncService {
             completedTasks: payload.completed_tasks,
             timestamp: payload.timestamp,
           });
-          logger.info(`📡 Broadcasted progress update to ScholarSync clients`);
+          console.log(`📡 Broadcasted progress update to ScholarSync clients`);
         }
       } else {
-        logger.warn(`Group ${payload.group_id} not found in team_groups table`);
+        console.warn(`⚠️ Group ${payload.group_id} not found in team_groups table`);
       }
 
       await pool.end();
     } catch (error) {
-      logger.error('Error updating team_groups progress:', error);
+      console.error('❌ Error updating team_groups progress:', error);
     }
   }
 
@@ -135,9 +134,9 @@ class ProgressSyncService {
       try {
         await this.client.query('UNLISTEN progress_update');
         await this.client.end();
-        logger.info('🔕 Stopped listening for progress updates');
+        console.log('🔕 Stopped listening for progress updates');
       } catch (error) {
-        logger.error('Error stopping progress sync service:', error);
+        console.error('❌ Error stopping progress sync service:', error);
       }
     }
     this.isListening = false;
