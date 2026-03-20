@@ -809,13 +809,25 @@ app.post('/api/import-from-sheet', async (req, res) => {
           courseId = newCourse.rows[0].id;
         }
 
-        // 2. Get the ScholarSync organization for team_groups
-        let orgResult = await client.query("SELECT id FROM organizations WHERE name = 'ScholarSync' LIMIT 1");
+        // 2. Create or get organization for this specific course
+        const orgName = `${parsed.courseCode} - ${parsed.courseTerm}`;
+        const orgDomain = `${parsed.courseCode.toLowerCase().replace(/\s+/g, '-')}.scholarsync.local`;
+        
+        let orgResult = await client.query(
+          "SELECT id FROM organizations WHERE name = $1 LIMIT 1",
+          [orgName]
+        );
+        
         if (orgResult.rows.length === 0) {
           orgResult = await client.query(
             `INSERT INTO organizations (name, description, domain)
-             VALUES ('ScholarSync', 'Academic collaboration workspace synced from ScholarSync', 'scholarsync.local')
-             RETURNING id`
+             VALUES ($1, $2, $3)
+             RETURNING id`,
+            [
+              orgName,
+              `${parsed.courseName} - Academic collaboration workspace synced from ScholarSync`,
+              orgDomain
+            ]
           );
         }
         const orgId = orgResult.rows[0]?.id;
