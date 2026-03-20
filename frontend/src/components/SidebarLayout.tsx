@@ -117,9 +117,10 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                                 <p className="text-sm font-semibold text-gray-800">{userEmail.split('@')[0] || 'User'}</p>
                                 <p className="text-xs text-gray-500 capitalize">{isAdmin ? 'Admin' : 'Student'}</p>
                             </div>
+                            <ThemeToggle />
                             <button 
                                 onClick={handleLogout} 
-                                className="p-2.5 hover:bg-red-50 rounded-xl transition-all duration-300 group title='Logout'"
+                                className="p-2.5 hover:bg-red-50 rounded-xl transition-all duration-300 group"
                                 title="Sign Out"
                             >
                                 <LogOut className="w-5 h-5 text-gray-400 group-hover:text-red-500 transition-colors" />
@@ -171,32 +172,6 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                             </div>
                         )}
 
-                        {/* Spacer */}
-                        <div className="mt-auto pt-6 border-t border-gray-200/50 space-y-2">
-                             {isSidebarOpen ? (
-                                <>
-                                    <ThemeToggle />
-                                    <button
-                                        onClick={handleLogout}
-                                        className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all duration-300 group"
-                                    >
-                                        <LogOut className="w-5 h-5" />
-                                        <span>Sign Out</span>
-                                    </button>
-                                </>
-                            ) : (
-                                <>
-                                    <ThemeToggle />
-                                    <button
-                                        onClick={handleLogout}
-                                        className="flex items-center justify-center p-3 text-red-500 rounded-xl hover:bg-red-50 transition-all w-full"
-                                        title="Sign Out"
-                                    >
-                                        <LogOut className="w-5 h-5" />
-                                    </button>
-                                </>
-                            )}
-                        </div>
                     </div>
                 </aside>
 
@@ -226,16 +201,6 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                                 )}
                             </nav>
 
-                            <div className="mt-auto space-y-2">
-                                <ThemeToggle />
-                                <button 
-                                    onClick={handleLogout} 
-                                    className="flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all w-full"
-                                >
-                                    <LogOut className="w-5 h-5" />
-                                    <span>Sign Out</span>
-                                </button>
-                            </div>
                         </aside>
                     </div>
                 )}
