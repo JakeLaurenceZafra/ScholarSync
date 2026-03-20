@@ -1,5 +1,5 @@
 import { Router } from 'express';
-import pool from '../Config/supabaseconfig.js';
+import { pool } from '../db.js';
 import jwt from 'jsonwebtoken';
 
 const router = Router();
