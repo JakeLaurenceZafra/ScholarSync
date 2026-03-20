@@ -19,6 +19,7 @@ import {
 } from 'lucide-react';
 import { jwtDecode } from 'jwt-decode';
 import ThemeToggle from './shared/ThemeToggle';
+import { useTheme } from '@/contexts/ThemeContext';
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
