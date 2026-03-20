@@ -5,6 +5,8 @@ import { useParams, useRouter } from 'next/navigation';
 import SidebarLayout from '@/components/SidebarLayout';
 import { API_URL } from '@/lib/api';
 import { jwtDecode } from 'jwt-decode';
+import { io, Socket } from 'socket.io-client';
+import ProgressBar from '@/components/ProgressBar';
 import {
     ArrowLeft,
     Users,
@@ -56,6 +58,9 @@ type Group = {
     consultation_dates: string[];
     comments: string;
     grade: string;
+    progress?: number;
+    total_tasks?: number;
+    completed_tasks?: number;
 };
 
 type Comment = {
@@ -91,6 +96,9 @@ export default function CourseDetailsPage() {
     const [activeModalTab, setActiveModalTab] = useState<'discussion' | 'journals' | 'ai'>('discussion');
     const [journals, setJournals] = useState<any[]>([]);
     
+    // Socket.io for real-time progress updates
+    const [socket, setSocket] = useState<Socket | null>(null);
+    
     // Inline AI Result State
     const [generatingAI, setGeneratingAI] = useState(false);
     const [aiResult, setAiResult] = useState<{ type: 'summary' | 'insights', content: string, cached?: boolean } | null>(null);
@@ -104,7 +112,10 @@ export default function CourseDetailsPage() {
     const [journalAction, setJournalAction] = useState('');
     const [isSubmittingJournal, setIsSubmittingJournal] = useState(false);
 
-    const skyflowUrl = 'http://localhost:3000/boards';
+    const getSkyflowUrl = () => {
+        const token = localStorage.getItem('auth_token');
+        return token ? `http://localhost:3000/boards?token=${token}` : 'http://localhost:3000/boards';
+    };
 
     useEffect(() => {
         const token = localStorage.getItem('auth_token');
@@ -118,6 +129,61 @@ export default function CourseDetailsPage() {
         }
         fetchCourse(token);
         fetchGroups(token);
+
+        // Initialize Socket.io connection for real-time progress updates
+        const newSocket = io('http://localhost:5000', {
+            transports: ['websocket', 'polling'],
+        });
+
+        newSocket.on('connect', () => {
+            console.log('🔌 Connected to ScholarSync backend for real-time updates');
+        });
+
+        newSocket.on('progressUpdated', (data: { 
+            groupId: string; 
+            progress: number; 
+            totalTasks: number; 
+            completedTasks: number;
+        }) => {
+            console.log('📊 Progress update received:', data);
+            
+            // Update the groups list with new progress
+            setGroups(prevGroups => 
+                prevGroups.map(group => 
+                    group.id === data.groupId 
+                        ? { 
+                            ...group, 
+                            progress: data.progress,
+                            total_tasks: data.totalTasks,
+                            completed_tasks: data.completedTasks
+                          }
+                        : group
+                )
+            );
+
+            // Update selected group if it's the one that changed
+            setSelectedGroup(prevSelected => 
+                prevSelected && prevSelected.id === data.groupId
+                    ? { 
+                        ...prevSelected, 
+                        progress: data.progress,
+                        total_tasks: data.totalTasks,
+                        completed_tasks: data.completedTasks
+                      }
+                    : prevSelected
+            );
+        });
+
+        newSocket.on('disconnect', () => {
+            console.log('🔌 Disconnected from ScholarSync backend');
+        });
+
+        setSocket(newSocket);
+
+        // Cleanup on unmount
+        return () => {
+            newSocket.close();
+        };
     }, [courseId, router]);
 
     const fetchCourse = async (token: string) => {
@@ -532,6 +598,18 @@ export default function CourseDetailsPage() {
                                         </button>
                                     </div>
 
+                                    {/* Real-Time Progress Bar from SkyFlow */}
+                                    <div className="mb-8 p-6 bg-gradient-to-br from-blue-50/50 to-cyan-50/50 rounded-3xl border border-blue-100/50 backdrop-blur-sm">
+                                        <ProgressBar 
+                                            progress={selectedGroup.progress || 0}
+                                            totalTasks={selectedGroup.total_tasks}
+                                            completedTasks={selectedGroup.completed_tasks}
+                                        />
+                                        <p className="text-xs text-gray-500 mt-3 text-center italic">
+                                            Synced in real-time from SkyFlow project tasks
+                                        </p>
+                                    </div>
+
                                     {isJournalFormOpen && (
                                         <div className="mb-8 p-8 bg-blue-50/30 border-2 border-dashed border-blue-200 rounded-[32px] animate-in fade-in slide-in-from-top-4 duration-500">
                                             <div className="flex items-center justify-between mb-6 pb-4 border-b border-blue-100">
@@ -711,7 +789,7 @@ export default function CourseDetailsPage() {
                         </div>
 
                         <div className="px-10 py-8 bg-white border-t border-gray-100 flex items-center justify-between">
-                            <a href={skyflowUrl} target="_blank" rel="noopener noreferrer" className="text-blue-600 font-black text-[11px] uppercase tracking-[0.25em] underline underline-offset-8 decoration-2 decoration-blue-200 hover:text-blue-700 transition-colors">
+                            <a href={getSkyflowUrl()} className="text-blue-600 font-black text-[11px] uppercase tracking-[0.25em] underline underline-offset-8 decoration-2 decoration-blue-200 hover:text-blue-700 transition-colors">
                                 View Full Analytics in SkyFlow
                             </a>
                             <button onClick={closeModal} className="px-12 py-4 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-[0.2em] rounded-2xl shadow-2xl shadow-blue-200 transition-all active:scale-95">

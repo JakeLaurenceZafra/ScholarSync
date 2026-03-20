@@ -8,12 +8,31 @@ import pg from 'pg';
 import axios from 'axios';
 import { parse } from 'csv-parse/sync';
 import { google } from 'googleapis';
+import { createServer } from 'http';
+import { Server as SocketIOServer } from 'socket.io';
 import aiRoutes from './routes/ai.routes.js';
 import { GoogleDocsService } from './googleDocsService.js';
 import { authenticate, authorizeRole } from './middleware/auth.js';
 import { pool } from './db.js';
+import { progressSyncService } from './services/progress-sync.service.js';
 
 const app = express();
+const httpServer = createServer(app);
+const io = new SocketIOServer(httpServer, {
+  cors: {
+    origin: ['http://localhost:3000', 'http://localhost:3002'],
+    credentials: true,
+  },
+});
+
+// Socket.io connection handling
+io.on('connection', (socket) => {
+  console.log(`🔌 Client connected: ${socket.id}`);
+  
+  socket.on('disconnect', () => {
+    console.log(`🔌 Client disconnected: ${socket.id}`);
+  });
+});
 
 app.use(cors({
   origin: ['http://localhost:3000', 'http://localhost:3002'],
@@ -1550,6 +1569,11 @@ app.delete('/api/calendar/events/:eventId', async (req, res) => {
 });
 
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
+httpServer.listen(PORT, async () => {
   console.log(`🚀 Backend running on http://localhost:${PORT}`);
+  console.log(`🔌 Socket.io enabled for real-time updates`);
+  
+  // Initialize progress sync service
+  progressSyncService.setSocketIO(io);
+  await progressSyncService.startListening();
 });
