@@ -11,6 +11,7 @@ import { google } from 'googleapis';
 import { createServer } from 'http';
 import { Server as SocketIOServer } from 'socket.io';
 import aiRoutes from './routes/ai.routes.js';
+import consultationRoutes from './routes/consultation.routes.js';
 import { GoogleDocsService } from './googleDocsService.js';
 import { authenticate, authorizeRole } from './middleware/auth.js';
 import { pool } from './db.js';
@@ -42,6 +43,7 @@ app.use(express.json());
 
 // Register ported ScholarSyncV3 routes
 app.use('/api/ai', aiRoutes);
+app.use('/api/consultation', consultationRoutes);
 
 passport.use(new GoogleStrategy({
   clientID: process.env.GOOGLE_CLIENT_ID!,
