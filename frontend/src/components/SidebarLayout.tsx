@@ -172,23 +172,29 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                         )}
 
                         {/* Spacer */}
-                        <div className="mt-auto pt-6 border-t border-gray-200/50">
+                        <div className="mt-auto pt-6 border-t border-gray-200/50 space-y-2">
                              {isSidebarOpen ? (
-                                <button
-                                    onClick={handleLogout}
-                                    className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all duration-300 group"
-                                >
-                                    <LogOut className="w-5 h-5" />
-                                    <span>Sign Out</span>
-                                </button>
+                                <>
+                                    <ThemeToggle />
+                                    <button
+                                        onClick={handleLogout}
+                                        className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium text-red-600 rounded-xl hover:bg-red-50 transition-all duration-300 group"
+                                    >
+                                        <LogOut className="w-5 h-5" />
+                                        <span>Sign Out</span>
+                                    </button>
+                                </>
                             ) : (
-                                <button
-                                    onClick={handleLogout}
-                                    className="flex items-center justify-center p-3 text-red-500 rounded-xl hover:bg-red-50 transition-all w-full"
-                                    title="Sign Out"
-                                >
-                                    <LogOut className="w-5 h-5" />
-                                </button>
+                                <>
+                                    <ThemeToggle />
+                                    <button
+                                        onClick={handleLogout}
+                                        className="flex items-center justify-center p-3 text-red-500 rounded-xl hover:bg-red-50 transition-all w-full"
+                                        title="Sign Out"
+                                    >
+                                        <LogOut className="w-5 h-5" />
+                                    </button>
+                                </>
                             )}
                         </div>
                     </div>
