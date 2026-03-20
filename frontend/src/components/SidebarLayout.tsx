@@ -28,6 +28,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     const [userEmail, setUserEmail] = useState('');
     const pathname = usePathname();
     const router = useRouter();
+    const { toggleMode, setRole } = useTheme();
 
     useEffect(() => {
         const token = typeof window !== 'undefined' ? localStorage.getItem('auth_token') : null;
@@ -37,11 +38,20 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                 setIsAdmin(decoded.role === 'Admin');
                 setUserRole(decoded.role || '');
                 setUserEmail(decoded.email || '');
+                
+                // Set theme role based on user's accountRole
+                if (decoded.role === 'Admin') {
+                    setRole('admin');
+                } else if (decoded.role === 'Adviser') {
+                    setRole('manager');
+                } else {
+                    setRole('member');
+                }
             } catch (e) {
                 console.error('Failed to decode token:', e);
             }
         }
-    }, []);
+    }, [setRole]);
 
     const handleLogout = () => {
         localStorage.removeItem('auth_token');
