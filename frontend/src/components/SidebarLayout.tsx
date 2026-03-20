@@ -62,19 +62,29 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     const NavLink = ({ href, label, icon: Icon }: { href: string; label: string; icon: any }) => (
         <Link
             href={href}
-            className={`w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-300 group shadow-sm hover:shadow-md ${
-                isActive(href)
-                    ? 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-md'
-                    : 'text-gray-700 hover:bg-gradient-to-r hover:from-blue-500/10 hover:to-cyan-500/10 hover:text-blue-600'
-            }`}
+            className="w-full flex items-center gap-3 px-4 py-3 text-sm font-medium rounded-xl transition-all duration-300 group shadow-sm hover:shadow-md"
+            style={{
+                background: isActive(href) ? 'linear-gradient(90deg, var(--color-primary), var(--color-secondary))' : 'transparent',
+                color: isActive(href) ? '#ffffff' : 'var(--color-text)'
+            }}
+            onMouseEnter={(e) => {
+                if (!isActive(href)) {
+                    e.currentTarget.style.backgroundColor = 'var(--color-hover)';
+                }
+            }}
+            onMouseLeave={(e) => {
+                if (!isActive(href)) {
+                    e.currentTarget.style.backgroundColor = 'transparent';
+                }
+            }}
         >
-            <Icon className={`w-5 h-5 transition-colors ${isActive(href) ? 'text-white' : 'text-gray-500 group-hover:text-blue-600'}`} />
+            <Icon className="w-5 h-5 transition-colors" style={{ color: isActive(href) ? '#ffffff' : 'var(--color-text)' }} />
             <span>{label}</span>
         </Link>
     );
 
     return (
-        <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-cyan-50 relative overflow-hidden font-sans">
+        <div className="min-h-screen relative overflow-hidden font-sans transition-colors duration-300" style={{ backgroundColor: 'var(--color-background)' }}>
             {/* Animated Background Elements (SkyFlow Style) */}
             <div className="absolute inset-0 overflow-hidden pointer-events-none">
                 <div className="absolute top-20 left-10 w-72 h-72 bg-blue-200/30 rounded-full blur-3xl animate-float-slow"></div>
@@ -83,14 +93,15 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
             </div>
 
             {/* Header */}
-            <header className="border-b border-white/40 bg-white/70 backdrop-blur-xl sticky top-0 z-40 shadow-lg">
+            <header className="sticky top-0 z-40 shadow-lg backdrop-blur-xl transition-colors duration-300" style={{ backgroundColor: 'var(--color-surface)', borderBottom: '1px solid var(--color-border)' }}>
                 <div className="px-4 sm:px-6 lg:px-8 py-4">
                     <div className="flex items-center justify-between">
                         <div className="flex items-center gap-3">
                             {/* Mobile Menu Toggle */}
                             <button 
                                 onClick={() => setIsMobileMenuOpen(!isMobileMenuOpen)} 
-                                className="lg:hidden p-2 text-gray-600 hover:bg-gray-100 rounded-lg transition-colors"
+                                className="lg:hidden p-2 rounded-lg transition-colors"
+                                style={{ color: 'var(--color-text)' }}
                             >
                                 {isMobileMenuOpen ? <X className="w-6 h-6" /> : <Menu className="w-6 h-6" />}
                             </button>
@@ -114,8 +125,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                         {/* Desktop Header Actions */}
                         <div className="hidden md:flex items-center gap-6">
                             <div className="flex flex-col items-end">
-                                <p className="text-sm font-semibold text-gray-800">{userEmail.split('@')[0] || 'User'}</p>
-                                <p className="text-xs text-gray-500 capitalize">{isAdmin ? 'Admin' : 'Student'}</p>
+                                <p className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>{userEmail.split('@')[0] || 'User'}</p>
+                                <p className="text-xs" style={{ color: 'var(--color-textSecondary)' }}>{isAdmin ? 'Admin' : 'Student'}</p>
                             </div>
                             <ThemeToggle />
                             <button 
@@ -132,12 +143,13 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
             <div className="flex relative z-30">
                 {/* Desktop Sidebar */}
-                <aside className={`hidden lg:flex lg:flex-col sticky top-[73px] h-[calc(100vh-73px)] border-r border-white/40 bg-white/70 backdrop-blur-xl transition-all duration-300 shadow-xl ${isSidebarOpen ? 'w-64' : 'w-20'}`}>
+                <aside className={`hidden lg:flex lg:flex-col sticky top-[73px] h-[calc(100vh-73px)] backdrop-blur-xl transition-all duration-300 shadow-xl ${isSidebarOpen ? 'w-64' : 'w-20'}`} style={{ backgroundColor: 'var(--color-surface)', borderRight: '1px solid var(--color-border)' }}>
                     <div className="p-4 flex flex-col h-full">
                         {/* Sidebar Toggle */}
                         <button 
                             onClick={() => setIsSidebarOpen(!isSidebarOpen)}
-                            className="self-end mb-6 p-1.5 text-gray-400 hover:text-gray-700 hover:bg-gray-100 rounded-lg transition-all"
+                            className="self-end mb-6 p-1.5 rounded-lg transition-all"
+                            style={{ color: 'var(--color-textSecondary)' }}
                         >
                             <ChevronDown className={`w-4 h-4 transition-transform duration-300 ${isSidebarOpen ? 'rotate-90' : '-rotate-90'}`} />
                         </button>
@@ -151,11 +163,11 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                                     <Link
                                         key={item.href}
                                         href={item.href}
-                                        className={`flex items-center justify-center p-3 rounded-xl transition-all duration-300 ${
-                                            isActive(item.href)
-                                                ? 'bg-gradient-to-r from-blue-500 to-cyan-500 text-white shadow-md'
-                                                : 'text-gray-500 hover:bg-blue-50 hover:text-blue-600'
-                                        }`}
+                                        className="flex items-center justify-center p-3 rounded-xl transition-all duration-300"
+                                        style={{
+                                            background: isActive(item.href) ? 'linear-gradient(90deg, var(--color-primary), var(--color-secondary))' : 'transparent',
+                                            color: isActive(item.href) ? '#ffffff' : 'var(--color-text)'
+                                        }}
                                         title={item.label}
                                     >
                                         <item.icon className="w-5 h-5" />
@@ -166,8 +178,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
 
                         {/* Admin Section */}
                         {isAdmin && isSidebarOpen && (
-                            <div className="mt-8 pt-6 border-t border-gray-200/50">
-                                <h2 className="text-[10px] font-bold text-gray-400 uppercase tracking-widest mb-4 px-4">Admin Panel</h2>
+                            <div className="mt-8 pt-6" style={{ borderTop: '1px solid var(--color-border)' }}>
+                                <h2 className="text-[10px] font-bold uppercase tracking-widest mb-4 px-4" style={{ color: 'var(--color-textSecondary)' }}>Admin Panel</h2>
                                 <NavLink href="/admin/accounts" label="Accounts" icon={Shield} />
                             </div>
                         )}
@@ -179,7 +191,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                 {isMobileMenuOpen && (
                     <div className="fixed inset-0 z-50 lg:hidden">
                         <div className="absolute inset-0 bg-black/20 backdrop-blur-sm" onClick={() => setIsMobileMenuOpen(false)} />
-                        <aside className="absolute left-0 top-0 bottom-0 w-72 bg-white/95 backdrop-blur-xl shadow-2xl p-6 flex flex-col animate-in slide-in-from-left duration-300">
+                        <aside className="absolute left-0 top-0 bottom-0 w-72 backdrop-blur-xl shadow-2xl p-6 flex flex-col animate-in slide-in-from-left duration-300" style={{ backgroundColor: 'var(--color-surface)' }}>
                             <div className="flex items-center gap-3 mb-10">
                                 <div className="p-2 bg-gradient-to-br from-blue-500 to-cyan-500 rounded-xl shadow-md">
                                     <Cloud className="w-6 h-6 text-white" />
@@ -195,7 +207,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                                 ))}
                                 
                                 {isAdmin && (
-                                    <div className="pt-6 border-t border-gray-100 mt-6">
+                                    <div className="pt-6 mt-6" style={{ borderTop: '1px solid var(--color-border)' }}>
                                         <NavLink href="/admin/accounts" label="Accounts" icon={Shield} />
                                     </div>
                                 )}
