@@ -448,20 +448,39 @@ app.get('/api/courses/:id/groupings', async (req, res) => {
   }
 });
 
-// Returns groupings WITH embedded members for a course
 app.get('/api/courses/:id/group-members', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
   if (!token) return res.sendStatus(401);
 
   try {
-    jwt.verify(token, process.env.JWT_SECRET || "test");
-    const { rows: groups } = await pool.query(
-      `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project,
-              consultation_dates, comments, grade, course_id as "courseID"
-       FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
-      [req.params.id]
-    );
+    const user: any = jwt.verify(token, process.env.JWT_SECRET || "test");
+    
+    // Get user's account info to check role and group
+    const accRes = await pool.query('SELECT "accountRole", "accountGroup" FROM ss_account WHERE account_id = $1', [user.id]);
+    const account = accRes.rows[0];
+    
+    let groups;
+    
+    // If student, only show their group
+    if (account && account.accountRole === 'Student' && account.accountGroup) {
+      const { rows } = await pool.query(
+        `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project,
+                consultation_dates, comments, grade, course_id as "courseID"
+         FROM team_groups WHERE course_id = $1 AND name = $2 ORDER BY team_number`,
+        [req.params.id, account.accountGroup]
+      );
+      groups = rows;
+    } else {
+      // Admin/Adviser see all groups
+      const { rows } = await pool.query(
+        `SELECT id, name as "groupName", team_number, adviser_name as adviser, proposed_project,
+                consultation_dates, comments, grade, course_id as "courseID"
+         FROM team_groups WHERE course_id = $1 ORDER BY team_number`,
+        [req.params.id]
+      );
+      groups = rows;
+    }
 
     // Fetch members for each group
     const enriched = await Promise.all(groups.map(async (g: any) => {
@@ -505,9 +524,9 @@ app.get('/api/groups/:id', async (req, res) => {
 
     // Fetch members explicitly spreading to member1...member5 for legacy UI support
     const { rows: members } = await pool.query(
-         `SELECT member_number, name, email, is_leader FROM team_group_members
-          WHERE team_group_id = $1 ORDER BY member_number`,
-         [req.params.id]
+      `SELECT member_number, name, email, is_leader FROM team_group_members
+       WHERE team_group_id = $1 ORDER BY member_number`,
+      [req.params.id]
     );
 
     const groupData: any = {

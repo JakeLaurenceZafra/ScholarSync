@@ -24,12 +24,16 @@ router.get('/slots/adviser/:adviserId', authenticate, async (req, res) => {
   try {
     const { adviserId } = req.params;
     
+    console.log('Fetching slots for adviser ID:', adviserId);
+    
     const { rows } = await pool.query(
-      `SELECT * FROM consultation_slots WHERE adviser_id = $1 ORDER BY slot_date, start_time`,
+      `SELECT * FROM ss_consultation_slots WHERE adviser_id = $1 ORDER BY slot_date, start_time`,
       [adviserId]
     );
     
-    return res.json(rows);
+    console.log(`Found ${rows.length} slots for adviser ${adviserId}`);
+    
+    return res.json({ slots: rows });
   } catch (error: any) {
     console.error('Error fetching consultation slots:', error);
     return res.status(500).json({ error: 'Failed to fetch consultation slots' });
@@ -66,20 +70,20 @@ router.post('/slots', authenticate, async (req, res) => {
           // Create morning and afternoon slots
           return Promise.all([
             pool.query(
-              `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'available') RETURNING *`,
+              `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser') RETURNING *`,
               [adviserId, courseId, date, '08:00', '12:00', slotType, maxGroups]
             ),
             pool.query(
-              `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-               VALUES ($1, $2, $3, $4, $5, $6, $7, 'available') RETURNING *`,
+              `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+               VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser') RETURNING *`,
               [adviserId, courseId, date, '13:00', '17:00', slotType, maxGroups]
             )
           ]);
         } else {
           return pool.query(
-            `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-             VALUES ($1, $2, $3, $4, $5, $6, $7, 'available') RETURNING *`,
+            `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser') RETURNING *`,
             [adviserId, courseId, date, startTime, endTime, slotType, maxGroups]
           );
         }
@@ -93,22 +97,22 @@ router.post('/slots', authenticate, async (req, res) => {
     if (isWholeDay) {
       // Create morning slot
       await pool.query(
-        `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'available')`,
+        `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser')`,
         [adviserId, courseId, slotDate, '08:00', '12:00', slotType, maxGroups]
       );
       
       // Create afternoon slot
       await pool.query(
-        `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'available')`,
+        `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser')`,
         [adviserId, courseId, slotDate, '13:00', '17:00', slotType, maxGroups]
       );
     } else {
       // Single time slot
       await pool.query(
-        `INSERT INTO consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, status)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, 'available')`,
+        `INSERT INTO ss_consultation_slots (adviser_id, course_id, slot_date, start_time, end_time, slot_type, max_groups, owner_account_id, owner_role)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $1, 'Adviser')`,
         [adviserId, courseId, slotDate, startTime, endTime, slotType, maxGroups]
       );
     }
@@ -125,7 +129,7 @@ router.delete('/slots/:slotId', authenticate, async (req, res) => {
   try {
     const { slotId } = req.params;
     
-    await pool.query('DELETE FROM consultation_slots WHERE slot_id = $1', [slotId]);
+    await pool.query('DELETE FROM ss_consultation_slots WHERE slot_id = $1', [slotId]);
     
     return res.json({ success: true, message: 'Slot deleted successfully' });
   } catch (error: any) {
@@ -141,7 +145,7 @@ router.delete('/slots/day/:date', authenticate, async (req, res) => {
     const user: any = req.user;
     
     await pool.query(
-      'DELETE FROM consultation_slots WHERE slot_date = $1 AND adviser_id = $2',
+      'DELETE FROM ss_consultation_slots WHERE slot_date = $1 AND adviser_id = $2',
       [date, user.id]
     );
     
@@ -159,7 +163,7 @@ router.put('/slots/:slotId', authenticate, async (req, res) => {
     const { startTime, endTime, maxGroups, slotType } = req.body;
     
     await pool.query(
-      `UPDATE consultation_slots 
+      `UPDATE ss_consultation_slots 
        SET start_time = $1, end_time = $2, max_groups = $3, slot_type = $4
        WHERE slot_id = $5`,
       [startTime, endTime, maxGroups, slotType, slotId]
@@ -180,7 +184,7 @@ router.put('/slots/day/:date', authenticate, async (req, res) => {
     const user: any = req.user;
     
     await pool.query(
-      `UPDATE consultation_slots 
+      `UPDATE ss_consultation_slots 
        SET start_time = $1, end_time = $2, max_groups = $3, slot_type = $4
        WHERE slot_date = $5 AND adviser_id = $6`,
       [startTime, endTime, maxGroups, slotType, date, user.id]
@@ -199,7 +203,7 @@ router.get('/bookings/slot/:slotId', authenticate, async (req, res) => {
     const { slotId } = req.params;
     
     const { rows } = await pool.query(
-      `SELECT * FROM consultation_bookings WHERE slot_id = $1 ORDER BY booked_at`,
+      `SELECT * FROM ss_consultation_bookings WHERE slot_id = $1 ORDER BY booked_at`,
       [slotId]
     );
     
