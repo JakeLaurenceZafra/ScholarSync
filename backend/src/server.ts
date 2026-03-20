@@ -1181,6 +1181,28 @@ app.post('/api/courses/:id/import-groups', async (req, res) => {
   }
 });
 
+// ── GET groups for a course (used by schedule page) ──
+app.get('/api/courses/:id/groups', async (req, res) => {
+  const authHeader = req.headers.authorization;
+  const token = authHeader && authHeader.split(' ')[1];
+  if (!token) return res.sendStatus(401);
+
+  try {
+    jwt.verify(token, process.env.JWT_SECRET || "test");
+    const courseId = req.params.id;
+
+    const { rows } = await pool.query(
+      'SELECT id, name, team_number FROM team_groups WHERE course_id = $1 ORDER BY team_number',
+      [courseId]
+    );
+
+    return res.json({ groups: rows });
+  } catch (err) {
+    console.error('Error fetching groups:', err);
+    return res.status(500).json({ error: 'Failed to fetch groups' });
+  }
+});
+
 app.get('/api/courses/:id/teams', async (req, res) => {
   const authHeader = req.headers.authorization;
   const token = authHeader && authHeader.split(' ')[1];
