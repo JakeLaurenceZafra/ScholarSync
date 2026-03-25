@@ -76,7 +76,21 @@ function getEventColors(event: CalendarEvent) {
 
 function formatTime(dateStr?: string, allDay?: boolean): string {
   if (allDay || !dateStr) return "All day"
-  return new Date(dateStr).toLocaleTimeString("en-US", { hour: "numeric", minute: "2-digit" })
+  return new Date(dateStr).toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Manila",
+  })
+}
+
+function formatTimeFromDate(date: Date): string {
+  return date.toLocaleTimeString("en-US", {
+    hour: "numeric",
+    minute: "2-digit",
+    hour12: true,
+    timeZone: "Asia/Manila",
+  })
 }
 
 function formatDateLabel(date: Date): string {
@@ -114,6 +128,93 @@ function getEventStartDate(event: CalendarEvent): Date | null {
     return new Date(y, m - 1, d, 0, 0, 0, 0)
   }
   return null
+}
+
+function getEventEndDate(event: CalendarEvent): Date | null {
+  if (event.end?.dateTime) {
+    const parsed = new Date(event.end.dateTime)
+    return Number.isNaN(parsed.getTime()) ? null : parsed
+  }
+  if (event.end?.date) {
+    const [y, m, d] = event.end.date.split("-").map(Number)
+    if (!y || !m || !d) return null
+    return new Date(y, m - 1, d, 0, 0, 0, 0)
+  }
+  return null
+}
+
+function getDayBounds(date: Date): { start: Date; end: Date } {
+  const start = new Date(date)
+  start.setHours(0, 0, 0, 0)
+  const end = new Date(start)
+  end.setDate(end.getDate() + 1)
+  return { start, end }
+}
+
+function eventOccursOnDate(event: CalendarEvent, date: Date): boolean {
+  const start = getEventStartDate(event)
+  if (!start) return false
+
+  const end = getEventEndDate(event) || start
+  const { start: dayStart, end: dayEnd } = getDayBounds(date)
+
+  // Google all-day events use an exclusive end date (end date is the day after the last visible day).
+  const isAllDay = !event.start?.dateTime
+  if (isAllDay) {
+    return start < dayEnd && end > dayStart
+  }
+
+  const safeEnd = end > start ? end : new Date(start.getTime() + 1)
+  return start < dayEnd && safeEnd > dayStart
+}
+
+function eventOverlapsHour(event: CalendarEvent, date: Date, hour: number): boolean {
+  if (!event.start?.dateTime) return false
+
+  const start = new Date(event.start.dateTime)
+  const endRaw = event.end?.dateTime ? new Date(event.end.dateTime) : new Date(start)
+  const end = endRaw > start ? endRaw : new Date(start.getTime() + 1)
+
+  const hourStart = new Date(date)
+  hourStart.setHours(hour, 0, 0, 0)
+  const hourEnd = new Date(hourStart)
+  hourEnd.setHours(hour + 1, 0, 0, 0)
+
+  return start < hourEnd && end > hourStart
+}
+
+function eventStartsInHour(event: CalendarEvent, date: Date, hour: number): boolean {
+  if (!event.start?.dateTime) return false
+  const start = new Date(event.start.dateTime)
+  if (Number.isNaN(start.getTime())) return false
+  return sameDay(start, date) && start.getHours() === hour
+}
+
+function getHourSegment(event: CalendarEvent, date: Date, hour: number): { start: Date; end: Date } | null {
+  if (!event.start?.dateTime) return null
+
+  const eventStart = new Date(event.start.dateTime)
+  const rawEnd = event.end?.dateTime ? new Date(event.end.dateTime) : new Date(eventStart)
+  const eventEnd = rawEnd > eventStart ? rawEnd : new Date(eventStart.getTime() + 1)
+
+  const hourStart = new Date(date)
+  hourStart.setHours(hour, 0, 0, 0)
+  const hourEnd = new Date(hourStart)
+  hourEnd.setHours(hour + 1, 0, 0, 0)
+
+  const segmentStart = eventStart > hourStart ? eventStart : hourStart
+  const segmentEnd = eventEnd < hourEnd ? eventEnd : hourEnd
+
+  if (segmentEnd <= segmentStart) return null
+  return { start: segmentStart, end: segmentEnd }
+}
+
+function isConsultationEvent(event: CalendarEvent | null): boolean {
+  if (!event) return false
+  const id = String(event.id || "")
+  const summary = String(event.summary || "").toLowerCase()
+  const description = String(event.description || "").toLowerCase()
+  return id.startsWith("consultation-") || summary.includes("consultation") || description.includes("consultation")
 }
 
 // ─────────────────────────────────────────────
@@ -190,6 +291,13 @@ export default function CalendarPage() {
 
   // ── Event CRUD ──
   const openCreate = (date?: Date) => {
+    const role = String(user?.role || "").toLowerCase()
+    const canCreate = role === "admin" || role === "adviser"
+    if (!canCreate) {
+      setCalendarWarning("Only Admin and Adviser accounts can create calendar events.")
+      return
+    }
+
     setEditingEvent(null)
     setFormError("")
     const base = date ?? new Date()
@@ -235,6 +343,13 @@ export default function CalendarPage() {
   }
 
   const handleSave = async () => {
+    const role = String(user?.role || "").toLowerCase()
+    const canCreate = role === "admin" || role === "adviser"
+    if (!canCreate) {
+      setFormError("Only Admin and Adviser accounts can create or edit events.")
+      return
+    }
+
     if (!formData.title.trim()) { setFormError("Event title is required."); return }
     if (!formData.startTime || !formData.endTime) { setFormError("Start and end times are required."); return }
     if (new Date(formData.startTime) >= new Date(formData.endTime)) {
@@ -255,8 +370,8 @@ export default function CalendarPage() {
         title: formData.title,
         description: formData.description,
         location: formData.location,
-        startTime: new Date(formData.startTime),
-        endTime: new Date(formData.endTime),
+        startTime: formData.startTime,
+        endTime: formData.endTime,
         allDay: formData.allDay,
         attendees: attendeeEmails,
       }
@@ -299,7 +414,12 @@ export default function CalendarPage() {
       if (res.ok) {
         setSelectedEvent(null)
         fetchEvents()
+      } else {
+        const err = await res.json().catch(() => ({}))
+        setCalendarWarning(err.error || "Failed to delete event.")
       }
+    } catch {
+      setCalendarWarning("Failed to delete event.")
     } finally {
       setDeletingEventId(null)
     }
@@ -308,9 +428,7 @@ export default function CalendarPage() {
   // ── Computed ──
   const getEventsForDate = (date: Date) =>
     events.filter((ev) => {
-      const d = getEventStartDate(ev)
-      if (!d) return false
-      return sameDay(d, date)
+      return eventOccursOnDate(ev, date)
     })
 
   const today = new Date()
@@ -385,6 +503,11 @@ export default function CalendarPage() {
     })
     .slice(0, 8)
 
+  const selectedIsConsultation = isConsultationEvent(selectedEvent)
+  const isStudent = String(user?.role || "").toLowerCase() === "student"
+  const isCalendarManager = ["admin", "adviser"].includes(String(user?.role || "").toLowerCase())
+  const canModifySelectedEvent = selectedEvent ? !(isStudent && selectedIsConsultation) : false
+
   if (!user) {
     return (
       <div className="min-h-screen bg-gradient-to-br from-blue-50 via-white to-cyan-50 flex items-center justify-center">
@@ -405,13 +528,15 @@ export default function CalendarPage() {
             </h1>
             <p className="text-gray-500 mt-1 text-sm">Your schedule, synced with Google Calendar</p>
           </div>
-          <button
-            onClick={() => openCreate()}
-            className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl font-medium hover:from-blue-600 hover:to-cyan-600 transition-all shadow-sm"
-          >
-            <Plus className="w-4 h-4" />
-            New Event
-          </button>
+          {isCalendarManager && (
+            <button
+              onClick={() => openCreate()}
+              className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-blue-500 to-cyan-500 text-white rounded-xl font-medium hover:from-blue-600 hover:to-cyan-600 transition-all shadow-sm"
+            >
+              <Plus className="w-4 h-4" />
+              New Event
+            </button>
+          )}
         </div>
 
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
@@ -559,9 +684,7 @@ export default function CalendarPage() {
                       </div>
                       {weekDays.map((wd) => {
                         const slotEvents = events.filter((ev) => {
-                          if (!ev.start.dateTime) return false
-                          const d = new Date(ev.start.dateTime)
-                          return sameDay(d, wd) && d.getHours() === h
+                          return eventStartsInHour(ev, wd, h)
                         })
                         return (
                           <div
@@ -582,6 +705,9 @@ export default function CalendarPage() {
                                   className={`text-xs px-1 py-0.5 rounded truncate font-medium mb-0.5 ${col.bg} ${col.text}`}
                                 >
                                   {ev.summary}
+                                  <div className="text-[10px] opacity-75 leading-tight">
+                                    {formatTime(ev.start.dateTime)} - {formatTime(ev.end.dateTime)}
+                                  </div>
                                 </div>
                               )
                             })}
@@ -641,9 +767,7 @@ export default function CalendarPage() {
                 <div className="max-h-[560px] overflow-y-auto">
                   {hours.map((h) => {
                     const slotEvents = events.filter((ev) => {
-                      if (!ev.start.dateTime) return false
-                      const d = new Date(ev.start.dateTime)
-                      return sameDay(d, currentDate) && d.getHours() === h
+                      return eventStartsInHour(ev, currentDate, h)
                     })
                     const isCurrentHour = sameDay(currentDate, today) && today.getHours() === h
 
@@ -664,9 +788,6 @@ export default function CalendarPage() {
                         <div className="flex-1 space-y-1">
                           {slotEvents.map((ev) => {
                             const col = getEventColors(ev)
-                            const start = new Date(ev.start.dateTime!)
-                            const end = new Date(ev.end.dateTime || ev.start.dateTime!)
-                            const duration = Math.round((end.getTime() - start.getTime()) / 60000)
                             return (
                               <div
                                 key={ev.id}
@@ -675,7 +796,7 @@ export default function CalendarPage() {
                               >
                                 <div className={`text-sm font-semibold ${col.text}`}>{ev.summary}</div>
                                 <div className={`text-xs ${col.text} opacity-70`}>
-                                  {formatTime(ev.start.dateTime)} • {duration >= 60 ? `${Math.floor(duration / 60)}h ` : ""}{duration % 60 > 0 ? `${duration % 60}m` : ""}
+                                  {`${formatTime(ev.start.dateTime)} - ${formatTime(ev.end.dateTime)}`}
                                 </div>
                                 {ev.location && (
                                   <div className={`text-xs flex items-center gap-1 mt-0.5 ${col.text} opacity-60`}>
@@ -761,20 +882,28 @@ export default function CalendarPage() {
                   </div>
 
                   <div className="flex gap-2">
-                    <button
-                      onClick={(e) => openEdit(selectedEvent, e)}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-600 text-sm font-medium rounded-lg hover:bg-blue-100 transition-colors"
-                    >
-                      <Pencil className="w-3.5 h-3.5" /> Edit
-                    </button>
-                    <button
-                      onClick={() => handleDelete(selectedEvent.id)}
-                      disabled={deletingEventId === selectedEvent.id}
-                      className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-red-50 text-red-600 text-sm font-medium rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50"
-                    >
-                      <Trash2 className="w-3.5 h-3.5" />
-                      {deletingEventId === selectedEvent.id ? "Deleting…" : "Delete"}
-                    </button>
+                    {canModifySelectedEvent ? (
+                      <>
+                        <button
+                          onClick={(e) => openEdit(selectedEvent, e)}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-blue-50 text-blue-600 text-sm font-medium rounded-lg hover:bg-blue-100 transition-colors"
+                        >
+                          <Pencil className="w-3.5 h-3.5" /> Edit
+                        </button>
+                        <button
+                          onClick={() => handleDelete(selectedEvent.id)}
+                          disabled={deletingEventId === selectedEvent.id}
+                          className="flex-1 flex items-center justify-center gap-1.5 px-3 py-2 bg-red-50 text-red-600 text-sm font-medium rounded-lg hover:bg-red-100 transition-colors disabled:opacity-50"
+                        >
+                          <Trash2 className="w-3.5 h-3.5" />
+                          {deletingEventId === selectedEvent.id ? "Deleting…" : "Delete"}
+                        </button>
+                      </>
+                    ) : (
+                      <div className="w-full text-xs text-amber-700 bg-amber-50 border border-amber-200 rounded-lg px-3 py-2">
+                        Students cannot edit or delete consultation events.
+                      </div>
+                    )}
                   </div>
                 </div>
               </div>
@@ -819,7 +948,7 @@ export default function CalendarPage() {
             )}
 
             {/* Quick Add Button if viewing selected event */}
-            {selectedEvent && (
+            {selectedEvent && isCalendarManager && (
               <button
                 onClick={() => openCreate()}
                 className="w-full flex items-center justify-center gap-2 py-3 bg-gradient-to-r from-blue-50 to-cyan-50 text-blue-600 text-sm font-medium rounded-xl border border-blue-100 hover:from-blue-100 hover:to-cyan-100 transition-colors"

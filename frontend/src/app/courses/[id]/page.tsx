@@ -27,6 +27,7 @@ import {
     TrendingUp,
     ClipboardList,
     ChevronDown,
+    MoreHorizontal,
     Folder,
     FileText
 } from 'lucide-react';
@@ -94,15 +95,8 @@ type MemberJournal = {
     groupName: string;
     member_email: string;
     journal_date: string;
-    task_updates: string[];
-    action_plans: string[];
-    issues: string[];
-    minutes_date?: string | null;
-    minutes_adviser?: string | null;
-    minutes_key_points?: string | null;
-    minutes_action_items?: string | null;
-    minutes_action_deadlines?: string | null;
-    next_consultation?: string | null;
+    journal_text: string;
+    journal_label: 'Updates' | 'Action Plans' | 'Issues and Blockers' | 'Reminder';
     created_at?: string;
 };
 
@@ -159,18 +153,14 @@ export default function CourseDetailsPage() {
     const [isSubmittingJournal, setIsSubmittingJournal] = useState(false);
     const [memberJournalForm, setMemberJournalForm] = useState({
         journalDate: '',
-        taskUpdates: '',
-        actionPlans: '',
-        issues: '',
-        minutesDate: '',
-        minutesAdviser: '',
-        minutesKeyPoints: '',
-        minutesActionItems: '',
-        minutesActionDeadlines: '',
-        nextConsultation: ''
+        journalText: '',
+        journalLabel: 'Updates'
     });
     const [submittingMemberJournal, setSubmittingMemberJournal] = useState(false);
     const [memberJournalError, setMemberJournalError] = useState<string | null>(null);
+    const todayJournalDate = new Date().toISOString().slice(0, 10);
+    const [editingMemberJournalId, setEditingMemberJournalId] = useState<number | null>(null);
+    const [openJournalActionMenuId, setOpenJournalActionMenuId] = useState<number | null>(null);
 
     const skyflowUrl = 'http://localhost:3000/boards';
 
@@ -237,6 +227,7 @@ export default function CourseDetailsPage() {
         setMemberJournals([]);
         setSelectedMemberFolder(null);
         setExpandedMemberJournalId(null);
+        setOpenJournalActionMenuId(null);
         setActiveModalTab('discussion');
         setAiResult(null);
         setAiError(null);
@@ -359,16 +350,12 @@ export default function CourseDetailsPage() {
 
     const handleSubmitMemberJournal = async () => {
         if (!course || !selectedGroup || !selectedMemberFolder) return;
-        if (!memberJournalForm.journalDate) {
-            setMemberJournalError('Journal date is required.');
+        const effectiveJournalDate = memberJournalForm.journalDate || todayJournalDate;
+
+        if (!memberJournalForm.journalText.trim()) {
+            setMemberJournalError('Journal text is required.');
             return;
         }
-
-        const toArray = (value: string) =>
-            value
-                .split('\n')
-                .map((line) => line.trim())
-                .filter(Boolean);
 
         setSubmittingMemberJournal(true);
         setMemberJournalError(null);
@@ -379,8 +366,12 @@ export default function CourseDetailsPage() {
                 return;
             }
 
-            const res = await fetch(`${API_URL}/api/member-journals`, {
-                method: 'POST',
+            const endpoint = editingMemberJournalId
+                ? `${API_URL}/api/member-journals/${editingMemberJournalId}`
+                : `${API_URL}/api/member-journals`;
+
+            const res = await fetch(endpoint, {
+                method: editingMemberJournalId ? 'PUT' : 'POST',
                 headers: {
                     'Content-Type': 'application/json',
                     Authorization: `Bearer ${token}`
@@ -389,16 +380,9 @@ export default function CourseDetailsPage() {
                     courseID: course.id,
                     groupID: selectedGroup.id,
                     member_email: selectedMemberFolder.email,
-                    journal_date: memberJournalForm.journalDate,
-                    task_updates: toArray(memberJournalForm.taskUpdates),
-                    action_plans: toArray(memberJournalForm.actionPlans),
-                    issues: toArray(memberJournalForm.issues),
-                    minutes_date: memberJournalForm.minutesDate || null,
-                    minutes_adviser: memberJournalForm.minutesAdviser || null,
-                    minutes_key_points: memberJournalForm.minutesKeyPoints || null,
-                    minutes_action_items: memberJournalForm.minutesActionItems || null,
-                    minutes_action_deadlines: memberJournalForm.minutesActionDeadlines || null,
-                    next_consultation: memberJournalForm.nextConsultation || null
+                    journal_date: effectiveJournalDate,
+                    journal_text: memberJournalForm.journalText,
+                    journal_label: memberJournalForm.journalLabel
                 })
             });
 
@@ -408,17 +392,11 @@ export default function CourseDetailsPage() {
             }
 
             setMemberJournalForm({
-                journalDate: '',
-                taskUpdates: '',
-                actionPlans: '',
-                issues: '',
-                minutesDate: '',
-                minutesAdviser: '',
-                minutesKeyPoints: '',
-                minutesActionItems: '',
-                minutesActionDeadlines: '',
-                nextConsultation: ''
+                journalDate: todayJournalDate,
+                journalText: '',
+                journalLabel: 'Updates'
             });
+            setEditingMemberJournalId(null);
             setIsJournalFormOpen(false);
             await fetchMemberJournals(selectedGroup.id);
         } catch (err: any) {
@@ -426,6 +404,66 @@ export default function CourseDetailsPage() {
             setMemberJournalError(err.message || 'Failed to create member journal.');
         } finally {
             setSubmittingMemberJournal(false);
+        }
+    };
+
+    const canManageMemberJournal = (entry: MemberJournal) => {
+        const role = String(user?.role || '').toLowerCase();
+        if (role === 'admin') return true;
+        const userEmail = String(user?.email || '').toLowerCase().trim();
+        const ownerEmail = String(entry.member_email || '').toLowerCase().trim();
+        return userEmail !== '' && userEmail === ownerEmail;
+    };
+
+    const handleEditMemberJournal = (entry: MemberJournal) => {
+        if (!canManageMemberJournal(entry)) return;
+        setOpenJournalActionMenuId(null);
+        setEditingMemberJournalId(entry.id);
+        setMemberJournalForm({
+            journalDate: String(entry.journal_date || '').slice(0, 10) || todayJournalDate,
+            journalText: entry.journal_text || '',
+            journalLabel: entry.journal_label || 'Updates'
+        });
+        setMemberJournalError(null);
+        setIsJournalFormOpen(true);
+    };
+
+    const handleDeleteMemberJournal = async (entry: MemberJournal) => {
+        if (!canManageMemberJournal(entry)) return;
+        setOpenJournalActionMenuId(null);
+        const confirmed = window.confirm('Delete this journal entry? This action cannot be undone.');
+        if (!confirmed) return;
+
+        try {
+            const token = localStorage.getItem('auth_token');
+            if (!token) {
+                setMemberJournalError('Authentication token not found.');
+                return;
+            }
+
+            const res = await fetch(`${API_URL}/api/member-journals/${entry.id}`, {
+                method: 'DELETE',
+                headers: {
+                    Authorization: `Bearer ${token}`
+                }
+            });
+
+            if (!res.ok) {
+                const errorData = await res.json().catch(() => ({}));
+                throw new Error(errorData.error || 'Failed to delete member journal.');
+            }
+
+            if (editingMemberJournalId === entry.id) {
+                setEditingMemberJournalId(null);
+                setIsJournalFormOpen(false);
+                setMemberJournalForm({ journalDate: todayJournalDate, journalText: '', journalLabel: 'Updates' });
+            }
+
+            if (selectedGroup) {
+                await fetchMemberJournals(selectedGroup.id);
+            }
+        } catch (err: any) {
+            setMemberJournalError(err?.message || 'Failed to delete member journal.');
         }
     };
 
@@ -648,6 +686,17 @@ export default function CourseDetailsPage() {
         return parsed.toLocaleString();
     };
 
+    const formatTime12Hour = (value: any) => {
+        const raw = String(value || '').trim().slice(0, 5);
+        const [hRaw, mRaw] = raw.split(':');
+        const h = Number(hRaw);
+        const m = Number(mRaw);
+        if (!Number.isFinite(h) || !Number.isFinite(m)) return String(value || '-');
+        const period = h >= 12 ? 'PM' : 'AM';
+        const hour12 = h % 12 || 12;
+        return `${hour12}:${String(m).padStart(2, '0')} ${period}`;
+    };
+
     const formatJournalDateDDMMYYYY = (value: any) => {
         if (!value) return '--/--/----';
         const text = String(value);
@@ -819,7 +868,7 @@ export default function CourseDetailsPage() {
                                 </h2>
                                 <div className="flex items-center gap-1 bg-gray-50 p-1 rounded-2xl w-fit border border-gray-100">
                                     {['discussion', 'journals', 'consultations', 'ai'].map((tab) => {
-                                        if (tab === 'ai' && !(user?.role === 'Admin' || user?.role === 'Adviser')) return null;
+                                        if (tab === 'ai' && user?.role !== 'Admin') return null;
                                         return (
                                             <button
                                                 key={tab}
@@ -989,7 +1038,7 @@ export default function CourseDetailsPage() {
                                                             <h4 className="text-base font-black text-gray-900 uppercase tracking-tight">{log.conMil || log.groupName || selectedGroup.groupName}</h4>
                                                             <p className="text-xs font-bold text-gray-400 uppercase tracking-wider mt-1">{log.adviser_name || 'Adviser'}</p>
                                                             <p className="text-xs text-gray-500 mt-2">
-                                                                {formatDateLabel(log.conDate || log.slot_date)}{log.start_time ? ` at ${log.start_time}` : ''}
+                                                                {formatDateLabel(log.conDate || log.slot_date)}{log.start_time ? ` at ${formatTime12Hour(log.start_time)}` : ''}
                                                             </p>
                                                             {log.conMil && <p className="text-xs text-gray-500 mt-1">Topic: {log.conMil}</p>}
                                                         </div>
@@ -1147,7 +1196,7 @@ export default function CourseDetailsPage() {
                                 View Full Analytics in SkyFlow
                             </a>
                             <button onClick={closeModal} className="px-12 py-4 bg-blue-600 hover:bg-blue-700 text-white text-xs font-black uppercase tracking-[0.2em] rounded-2xl shadow-2xl shadow-blue-200 transition-all active:scale-95">
-                                Dismiss Modal
+                                  Close
                             </button>
                         </div>
                     </div>
@@ -1166,6 +1215,9 @@ export default function CourseDetailsPage() {
                                 {user?.role === 'Student' && String(user?.email || '').toLowerCase() === String(selectedMemberFolder.email).toLowerCase() && (
                                     <button
                                         onClick={() => {
+                                            const today = new Date().toISOString().slice(0, 10);
+                                            setMemberJournalForm({ journalDate: today, journalText: '', journalLabel: 'Updates' });
+                                            setEditingMemberJournalId(null);
                                             setIsJournalFormOpen(true);
                                             setMemberJournalError(null);
                                         }}
@@ -1191,102 +1243,46 @@ export default function CourseDetailsPage() {
                         <div className="p-8 overflow-y-auto space-y-6">
                             {isJournalFormOpen && (
                                 <div className="p-6 bg-blue-50/40 border-2 border-dashed border-blue-200 rounded-3xl space-y-4">
-                                    <h4 className="font-black text-blue-900 uppercase tracking-tight">Create Journal Entry</h4>
+                                    <h4 className="font-black text-blue-900 uppercase tracking-tight">{editingMemberJournalId ? 'Edit Journal Entry' : 'Create Journal Entry'}</h4>
                                     {memberJournalError && <p className="text-sm text-red-600 font-semibold">{memberJournalError}</p>}
                                     <div>
                                         <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Journal Date</label>
                                         <input
                                             type="date"
-                                            value={memberJournalForm.journalDate}
+                                            value={memberJournalForm.journalDate || todayJournalDate}
                                             onChange={(e) => setMemberJournalForm(prev => ({ ...prev, journalDate: e.target.value }))}
                                             className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100"
                                         />
                                     </div>
                                     <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Task Updates (one per line)</label>
+                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Journal Label</label>
+                                        <select
+                                            value={memberJournalForm.journalLabel}
+                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, journalLabel: e.target.value }))}
+                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100"
+                                        >
+                                            <option value="Updates">Updates</option>
+                                            <option value="Action Plans">Action Plans</option>
+                                            <option value="Issues and Blockers">Issues and Blockers</option>
+                                            <option value="Reminder">Reminder</option>
+                                        </select>
+                                    </div>
+                                    <div>
+                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Journal Text</label>
                                         <textarea
                                             rows={4}
-                                            value={memberJournalForm.taskUpdates}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, taskUpdates: e.target.value }))}
+                                            value={memberJournalForm.journalText}
+                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, journalText: e.target.value }))}
                                             className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Action Plans (one per line)</label>
-                                        <textarea
-                                            rows={3}
-                                            value={memberJournalForm.actionPlans}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, actionPlans: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Issues / Blockers (one per line)</label>
-                                        <textarea
-                                            rows={3}
-                                            value={memberJournalForm.issues}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, issues: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
-                                        />
-                                    </div>
-                                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-                                        <div>
-                                            <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Minutes Date</label>
-                                            <input
-                                                type="date"
-                                                value={memberJournalForm.minutesDate}
-                                                onChange={(e) => setMemberJournalForm(prev => ({ ...prev, minutesDate: e.target.value }))}
-                                                className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100"
-                                            />
-                                        </div>
-                                        <div>
-                                            <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Next Consultation</label>
-                                            <input
-                                                type="date"
-                                                value={memberJournalForm.nextConsultation}
-                                                onChange={(e) => setMemberJournalForm(prev => ({ ...prev, nextConsultation: e.target.value }))}
-                                                className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100"
-                                            />
-                                        </div>
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Minutes Adviser</label>
-                                        <input
-                                            value={memberJournalForm.minutesAdviser}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, minutesAdviser: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Minutes Key Points</label>
-                                        <textarea
-                                            rows={3}
-                                            value={memberJournalForm.minutesKeyPoints}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, minutesKeyPoints: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Minutes Action Items</label>
-                                        <textarea
-                                            rows={3}
-                                            value={memberJournalForm.minutesActionItems}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, minutesActionItems: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
-                                        />
-                                    </div>
-                                    <div>
-                                        <label className="text-[10px] font-black text-blue-400 uppercase tracking-[0.2em] px-1">Minutes Action Deadlines</label>
-                                        <textarea
-                                            rows={2}
-                                            value={memberJournalForm.minutesActionDeadlines}
-                                            onChange={(e) => setMemberJournalForm(prev => ({ ...prev, minutesActionDeadlines: e.target.value }))}
-                                            className="w-full mt-1 px-4 py-3 bg-white border border-blue-100 rounded-2xl text-sm focus:outline-none focus:ring-4 focus:ring-blue-100 resize-none"
+                                            placeholder="Write your journal entry..."
                                         />
                                     </div>
                                     <div className="flex justify-end gap-3">
                                         <button
-                                            onClick={() => setIsJournalFormOpen(false)}
+                                            onClick={() => {
+                                                setIsJournalFormOpen(false);
+                                                setEditingMemberJournalId(null);
+                                            }}
                                             className="px-6 py-3 text-xs font-black uppercase tracking-widest text-blue-400 hover:text-blue-600 transition-colors"
                                         >
                                             Cancel
@@ -1297,7 +1293,7 @@ export default function CourseDetailsPage() {
                                             className="px-8 py-3 bg-blue-600 text-white rounded-2xl text-xs font-black uppercase tracking-widest hover:bg-blue-700 transition-all disabled:opacity-50 flex items-center gap-2"
                                         >
                                             {submittingMemberJournal ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                                            {submittingMemberJournal ? 'Saving...' : 'Save Entry'}
+                                            {submittingMemberJournal ? 'Saving...' : editingMemberJournalId ? 'Update Entry' : 'Save Entry'}
                                         </button>
                                     </div>
                                 </div>
@@ -1314,72 +1310,64 @@ export default function CourseDetailsPage() {
                                         .filter((j) => String(j.member_email).toLowerCase() === String(selectedMemberFolder.email).toLowerCase())
                                         .map((entry, idx) => (
                                             <div key={entry.id} className="bg-white border border-gray-200 rounded-2xl overflow-hidden">
-                                                <button
-                                                    type="button"
-                                                    onClick={() => setExpandedMemberJournalId(expandedMemberJournalId === entry.id ? null : entry.id)}
-                                                    className="w-full px-6 py-5 flex items-center justify-between text-left"
-                                                >
-                                                    <div className="min-w-0">
+                                                <div className="w-full px-6 py-5 flex items-center justify-between text-left">
+                                                    <button
+                                                        type="button"
+                                                        onClick={() => setExpandedMemberJournalId(expandedMemberJournalId === entry.id ? null : entry.id)}
+                                                        className="min-w-0 flex-1 text-left"
+                                                    >
                                                         <p className="text-sm font-black text-gray-900 uppercase tracking-tight">Journal Entry #{idx + 1}</p>
                                                         <p className="text-[11px] text-gray-400 font-bold truncate">Member: {entry.member_email}</p>
+                                                    </button>
+                                                    <div className="flex items-center gap-2 shrink-0">
+                                                        <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">{formatJournalDateDDMMYYYY(entry.journal_date || entry.created_at)}</p>
+                                                        {canManageMemberJournal(entry) && (
+                                                            <button
+                                                                type="button"
+                                                                onClick={() => setOpenJournalActionMenuId(openJournalActionMenuId === entry.id ? null : entry.id)}
+                                                                className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
+                                                                aria-label="Open journal actions"
+                                                            >
+                                                                <MoreHorizontal className="w-4 h-4" />
+                                                            </button>
+                                                        )}
+                                                        <button
+                                                            type="button"
+                                                            onClick={() => setExpandedMemberJournalId(expandedMemberJournalId === entry.id ? null : entry.id)}
+                                                            className="p-1.5 rounded-lg hover:bg-gray-100 text-gray-500"
+                                                            aria-label="Toggle journal details"
+                                                        >
+                                                            <ChevronDown className={`w-4 h-4 transition-transform ${expandedMemberJournalId === entry.id ? 'rotate-180' : ''}`} />
+                                                        </button>
                                                     </div>
-                                                    <div className="flex items-center gap-3 shrink-0">
-                                                        <p className="text-[11px] font-black text-gray-400 uppercase tracking-wider">{formatJournalDateDDMMYYYY(entry.journal_date)}</p>
-                                                        <ChevronDown className={`w-4 h-4 text-gray-400 transition-transform ${expandedMemberJournalId === entry.id ? 'rotate-180' : ''}`} />
+                                                </div>
+
+                                                {canManageMemberJournal(entry) && openJournalActionMenuId === entry.id && (
+                                                    <div className="px-6 pb-4 flex justify-end gap-2 border-t border-gray-100 pt-3">
+                                                        <button
+                                                            onClick={() => handleEditMemberJournal(entry)}
+                                                            className="px-3 py-2 text-xs font-black uppercase tracking-wider text-blue-700 bg-blue-100 rounded-xl hover:bg-blue-200 transition-colors"
+                                                        >
+                                                            Edit
+                                                        </button>
+                                                        <button
+                                                            onClick={() => handleDeleteMemberJournal(entry)}
+                                                            className="px-3 py-2 text-xs font-black uppercase tracking-wider text-red-700 bg-red-100 rounded-xl hover:bg-red-200 transition-colors flex items-center gap-1"
+                                                        >
+                                                            <Trash2 className="w-3.5 h-3.5" /> Delete
+                                                        </button>
                                                     </div>
-                                                </button>
+                                                )}
 
                                                 {expandedMemberJournalId === entry.id && (
                                                     <div className="px-6 pb-6 border-t border-gray-100 space-y-4">
                                                         <div className="pt-4 bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-2">Task Updates</p>
-                                                            {(entry.task_updates || []).length === 0 ? <p className="text-sm text-gray-500">No updates provided.</p> : (
-                                                                <ul className="space-y-1">
-                                                                    {(entry.task_updates || []).map((line, idx) => <li key={idx} className="text-sm text-gray-700">• {line}</li>)}
-                                                                </ul>
-                                                            )}
+                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-2">Journal Label</p>
+                                                            <p className="inline-flex text-xs font-black uppercase tracking-wider px-3 py-1 rounded-full bg-blue-100 text-blue-700">{entry.journal_label || 'Updates'}</p>
                                                         </div>
                                                         <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-2">Action Plans</p>
-                                                            {(entry.action_plans || []).length === 0 ? <p className="text-sm text-gray-500">No action plans provided.</p> : (
-                                                                <ul className="space-y-1">
-                                                                    {(entry.action_plans || []).map((line, idx) => <li key={idx} className="text-sm text-gray-700">• {line}</li>)}
-                                                                </ul>
-                                                            )}
-                                                        </div>
-                                                        <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-2">Issues / Blockers</p>
-                                                            {(entry.issues || []).length === 0 ? <p className="text-sm text-gray-500">No issues listed.</p> : (
-                                                                <ul className="space-y-1">
-                                                                    {(entry.issues || []).map((line, idx) => <li key={idx} className="text-sm text-gray-700">• {line}</li>)}
-                                                                </ul>
-                                                            )}
-                                                        </div>
-                                                        <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                                                            <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Minutes Date</p>
-                                                                <p className="text-sm text-gray-700">{entry.minutes_date || '-'}</p>
-                                                            </div>
-                                                            <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                                <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Next Consultation</p>
-                                                                <p className="text-sm text-gray-700">{entry.next_consultation || '-'}</p>
-                                                            </div>
-                                                        </div>
-                                                        <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Minutes Adviser</p>
-                                                            <p className="text-sm text-gray-700 whitespace-pre-wrap">{entry.minutes_adviser || '-'}</p>
-                                                        </div>
-                                                        <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Minutes Key Points</p>
-                                                            <p className="text-sm text-gray-700 whitespace-pre-wrap">{entry.minutes_key_points || '-'}</p>
-                                                        </div>
-                                                        <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Minutes Action Items</p>
-                                                            <p className="text-sm text-gray-700 whitespace-pre-wrap">{entry.minutes_action_items || '-'}</p>
-                                                        </div>
-                                                        <div className="bg-gray-50 border border-gray-100 rounded-xl p-3">
-                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-1">Minutes Action Deadlines</p>
-                                                            <p className="text-sm text-gray-700 whitespace-pre-wrap">{entry.minutes_action_deadlines || '-'}</p>
+                                                            <p className="text-[10px] font-black text-gray-400 uppercase tracking-[0.2em] mb-2">Journal Text</p>
+                                                            <p className="text-sm text-gray-700 whitespace-pre-wrap">{entry.journal_text || '-'}</p>
                                                         </div>
                                                     </div>
                                                 )}

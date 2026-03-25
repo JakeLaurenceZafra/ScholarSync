@@ -83,6 +83,7 @@ export default function DashboardPage() {
         </div>
 
         {/* Stats Grid */}
+        {user.role !== 'Student' && (
         <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
           <div className="glass-card p-6 hover:shadow-xl transition-all duration-300 transform hover:-translate-y-1">
             <div className="flex items-center gap-3 mb-3">
@@ -138,6 +139,7 @@ export default function DashboardPage() {
             <p className="text-xs text-gray-500 mt-1">Current semester</p>
           </div>
         </div>
+        )}
 
         {/* Quick Actions */}
         <div className="glass-card p-6 mb-8">

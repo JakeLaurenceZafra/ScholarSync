@@ -15,7 +15,8 @@ import {
     CheckCircle,
     X,
     KeyRound,
-    Loader2
+    Loader2,
+    CalendarPlus
 } from 'lucide-react';
 
 type Course = {
@@ -62,7 +63,7 @@ export default function CoursesPage() {
         try {
             const decoded: any = jwtDecode(token);
             setUser(decoded);
-            if (decoded.role === 'Admin' || decoded.role === 'Advisers') setCanCreate(true);
+            if (decoded.role === 'Admin') setCanCreate(true);
             fetchCourses(token);
         } catch (err) { router.push('/login'); }
     }, [router]);
@@ -143,6 +144,8 @@ export default function CoursesPage() {
     }
 
     const isAdmin = user?.role === 'Admin';
+    const isStudent = user?.role === 'Student';
+    const isAdviser = user?.role === 'Adviser' || user?.role === 'Advisers';
 
     return (
         <SidebarLayout>
@@ -150,7 +153,7 @@ export default function CoursesPage() {
                 {/* Header */}
                 <div className="mb-8">
                     <h1 className="text-4xl font-bold bg-gradient-to-r from-blue-600 to-cyan-600 bg-clip-text text-transparent">Courses</h1>
-                    <p className="text-gray-600 mt-2">{isAdmin ? 'Manage all courses' : canCreate ? 'Your managed courses' : 'Your enrolled courses'}</p>
+                    <p className="text-gray-600 mt-2">{isAdmin ? 'Course overview' : isAdviser ? 'Your assigned courses' : 'Your enrolled courses'}</p>
                 </div>
 
                 {/* Controls */}
@@ -172,7 +175,15 @@ export default function CoursesPage() {
                                 <Plus className="w-4 h-4" /> Create Course
                             </button>
                         )}
-                        {!isAdmin && (
+                        {isAdviser && (
+                            <button
+                                onClick={() => router.push('/schedule')}
+                                className="flex items-center gap-2 px-5 py-2.5 bg-gradient-to-r from-indigo-500 to-blue-500 text-white rounded-xl hover:shadow-lg transition-all text-sm font-medium"
+                            >
+                                <CalendarPlus className="w-4 h-4" /> Create Consultation
+                            </button>
+                        )}
+                        {isStudent && (
                             <div className="flex items-center gap-2">
                                 <input
                                     type="text"
@@ -249,7 +260,7 @@ export default function CoursesPage() {
                     <div className="glass-card p-12 text-center">
                         <BookOpen className="w-16 h-16 text-gray-300 mx-auto mb-4" />
                         <h3 className="text-xl font-semibold text-gray-700 mb-2">No courses found</h3>
-                        <p className="text-gray-500">{searchQuery ? 'Try a different search term' : canCreate ? 'Create your first course' : 'Enroll using a course key'}</p>
+                        <p className="text-gray-500">{searchQuery ? 'Try a different search term' : isAdviser ? 'Create your first course or wait for assigned imports.' : isAdmin ? 'No courses available yet.' : 'Enroll using a course key'}</p>
                     </div>
                 )}
             </div>

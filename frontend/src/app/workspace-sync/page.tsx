@@ -88,7 +88,11 @@ export default function WorkspaceSyncPage() {
         const token = localStorage.getItem('auth_token');
         if (!token) { router.push('/login'); return; }
         try {
-            const decoded = jwtDecode(token);
+            const decoded: any = jwtDecode(token);
+            if (decoded.role !== 'Admin') {
+                router.push('/dashboard');
+                return;
+            }
             setUser(decoded);
         } catch { router.push('/login'); return; }
         fetchCourses(token);

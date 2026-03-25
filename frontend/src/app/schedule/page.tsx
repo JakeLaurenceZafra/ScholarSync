@@ -44,8 +44,10 @@ const sortGroupsNaturally = (items: any[]) => {
 
 interface Booking {
   booking_id?: number
+  consultation_id?: number | null
   group_name: string
   slot_date: string
+  slot_date_only?: string
   start_time: string
   status: string
   group_id: number | string
@@ -71,6 +73,30 @@ const formatDayLabel = (dateValue: string) => {
 }
 
 const toDateKey = (slot: ConsultationSlot) => String(slot.slot_date_only || slot.slot_date || '').slice(0, 10)
+
+const parseLocalDateInput = (value: string): Date | null => {
+  const [yRaw, mRaw, dRaw] = String(value || '').split('-')
+  const y = Number(yRaw)
+  const m = Number(mRaw)
+  const d = Number(dRaw)
+  if (!y || !m || !d) return null
+  return new Date(y, m - 1, d)
+}
+
+const formatTime12Hour = (value: string): string => {
+  const raw = String(value || '').trim().slice(0, 5)
+  const [hRaw, mRaw] = raw.split(':')
+  const h = Number(hRaw)
+  const m = Number(mRaw)
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return value
+  const period = h >= 12 ? 'PM' : 'AM'
+  const hour12 = h % 12 || 12
+  return `${hour12}:${String(m).padStart(2, '0')} ${period}`
+}
+
+const formatTimeRange12Hour = (start: string, end: string): string => {
+  return `${formatTime12Hour(start)} - ${formatTime12Hour(end)}`
+}
 
 interface DeleteConfirmState {
   open: boolean
@@ -275,7 +301,11 @@ export default function SchedulePage() {
     }
 
     // Check if selected date is in the past
-    const selectedDate = new Date(formData.slotDate)
+    const selectedDate = parseLocalDateInput(formData.slotDate)
+    if (!selectedDate) {
+      setFormError("Please select a valid date.")
+      return
+    }
     selectedDate.setHours(0, 0, 0, 0)
     const today = new Date()
     today.setHours(0, 0, 0, 0)
@@ -310,7 +340,12 @@ export default function SchedulePage() {
       // Build Monday-Saturday dates for the selected week.
       if (formData.wholeWeek) {
         isWholeWeek = true
-        const base = new Date(formData.slotDate)
+        const base = parseLocalDateInput(formData.slotDate)
+        if (!base) {
+          setFormError('Please pick a valid date for whole-week scheduling.')
+          setIsSaving(false)
+          return
+        }
         const monday = new Date(base)
         const dayOfWeek = monday.getDay() // 0=Sun ... 6=Sat
         const toMondayOffset = dayOfWeek === 0 ? -6 : 1 - dayOfWeek
@@ -464,7 +499,7 @@ export default function SchedulePage() {
         const normalizedName = booking.group_name.trim().toLowerCase()
         console.log('Looking for group with normalized name:', normalizedName)
         const matched = (data.groups || []).find((g: any) => {
-          const gName = String(g.group_name || g.groupName || '').trim().toLowerCase()
+          const gName = String(g.group_name || g.groupName || g.name || '').trim().toLowerCase()
           console.log('Comparing:', gName, '===', normalizedName, '?', gName === normalizedName)
           return gName === normalizedName
         })
@@ -486,7 +521,7 @@ export default function SchedulePage() {
       const normalizedName = booking.group_name.trim().toLowerCase()
       console.log('Looking for group with normalized name:', normalizedName)
       const matched = (data.groups || []).find((g: any) => {
-        const gName = String(g.group_name || g.groupName || '').trim().toLowerCase()
+        const gName = String(g.group_name || g.groupName || g.name || '').trim().toLowerCase()
         console.log('Comparing:', gName, '===', normalizedName, '?', gName === normalizedName)
         return gName === normalizedName
       })
@@ -531,7 +566,7 @@ export default function SchedulePage() {
     console.log('Setting current booking:', normalizedBooking)
     setCurrentBooking(normalizedBooking)
 
-    const defaultConDate = String(normalizedBooking.slot_date || '').slice(0, 10)
+    const defaultConDate = String(normalizedBooking.slot_date_only || normalizedBooking.slot_date || '').slice(0, 10)
     setConsultationForm({
       adviserNotes: '',
       conDate: defaultConDate,
@@ -556,12 +591,12 @@ export default function SchedulePage() {
           const groupData = await res.json()
           console.log('Group data fetched:', groupData)
           const members = [
-            groupData.member1,
-            groupData.member2,
-            groupData.member3,
-            groupData.member4,
-            groupData.member5,
-          ].filter(m => m)
+            groupData.nameOne || groupData.member1,
+            groupData.nameTwo || groupData.member2,
+            groupData.nameThree || groupData.member3,
+            groupData.nameFour || groupData.member4,
+            groupData.nameFive || groupData.member5,
+          ].filter((m) => m)
 
           console.log('Members:', members)
           const initialAttendance: Record<string, 'Present' | 'Absent'> = {}
@@ -621,7 +656,7 @@ export default function SchedulePage() {
         adviser_notes: consultationForm.adviserNotes,
         conDate: consultationForm.conDate,
         conMil: consultationForm.conMil,
-        conSum: consultationForm.conSum,
+        conSum: consultationForm.adviserNotes,
         conAction: consultationForm.conAction,
         conConcerns: consultationForm.conConcerns,
         attendance_data: consultationForm.memberAttendance,
@@ -653,6 +688,7 @@ export default function SchedulePage() {
 
       setShowConsultationForm(false)
       setCurrentBooking(null)
+      setSlotBookings({})
       fetchSlots()
       setConsultationForm({
         adviserNotes: '',
@@ -1225,10 +1261,10 @@ export default function SchedulePage() {
                                   : 'bg-green-50 text-green-700 border border-green-200 hover:shadow-md'
                               }`}
                               onClick={() => toggleSlotExpand(slot.slot_id)}
-                              title={`${slot.start_time} - ${slot.end_time}: ${booked}/${capacity} groups booked`}
+                              title={`${formatTimeRange12Hour(slot.start_time, slot.end_time)}: ${booked}/${capacity} groups booked`}
                             >
                               <div className="flex items-center justify-between gap-2">
-                                <span>{slot.start_time} - {slot.end_time}</span>
+                                <span>{formatTimeRange12Hour(slot.start_time, slot.end_time)}</span>
                                 <span className="text-xs font-semibold opacity-70">({booked}/{capacity})</span>
                               </div>
                             </div>
@@ -1440,15 +1476,15 @@ export default function SchedulePage() {
               )}
 
               <div className="space-y-4 max-h-96 overflow-y-auto">
-                {/* Adviser Notes */}
+                {/* Milestone */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Adviser Notes</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Milestone/Topic</label>
                   <textarea
-                    value={consultationForm.adviserNotes}
-                    onChange={(e) => setConsultationForm({...consultationForm, adviserNotes: e.target.value})}
+                    value={consultationForm.conMil}
+                    onChange={(e) => setConsultationForm({...consultationForm, conMil: e.target.value})}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    rows={3}
-                    placeholder="Summary of discussion and observations..."
+                    rows={2}
+                    placeholder="What milestone or topic was discussed?"
                   />
                 </div>
 
@@ -1464,27 +1500,15 @@ export default function SchedulePage() {
                   />
                 </div>
 
-                {/* Milestone */}
+                {/* Adviser Notes */}
                 <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Milestone/Topic</label>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Adviser Notes</label>
                   <textarea
-                    value={consultationForm.conMil}
-                    onChange={(e) => setConsultationForm({...consultationForm, conMil: e.target.value})}
-                    className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
-                    rows={2}
-                    placeholder="What milestone or topic was discussed?"
-                  />
-                </div>
-
-                {/* Summary */}
-                <div>
-                  <label className="block text-sm font-medium text-gray-700 mb-1">Summary</label>
-                  <textarea
-                    value={consultationForm.conSum}
-                    onChange={(e) => setConsultationForm({...consultationForm, conSum: e.target.value})}
+                    value={consultationForm.adviserNotes}
+                    onChange={(e) => setConsultationForm({...consultationForm, adviserNotes: e.target.value})}
                     className="w-full px-3 py-2 border border-gray-300 rounded-lg focus:outline-none focus:ring-2 focus:ring-blue-500 text-sm"
                     rows={3}
-                    placeholder="Summary of the consultation discussion..."
+                    placeholder="Summary of discussion and observations..."
                   />
                 </div>
 
@@ -1591,7 +1615,7 @@ export default function SchedulePage() {
                           Slot Details
                         </h3>
                         <p className="text-sm text-gray-500">
-                          {formatDayLabel(slot.slot_date)} • {slot.start_time} - {slot.end_time}
+                          {formatDayLabel(toDateKey(slot))} • {formatTimeRange12Hour(slot.start_time, slot.end_time)}
                         </p>
                       </div>
                       <button
@@ -1624,12 +1648,14 @@ export default function SchedulePage() {
                           <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-blue-600"></div>
                         </div>
                       ) : slotBookings[slot.slot_id]?.length ? (
-                        slotBookings[slot.slot_id].map((booking) => (
+                        slotBookings[slot.slot_id].map((booking) => {
+                          const isCompleted = Boolean(booking.consultation_id)
+                          return (
                           <div key={booking.booking_id} className="bg-blue-50 border border-blue-200 p-3 rounded-lg">
                             <div className="flex items-center justify-between gap-2 mb-2">
                               <div className="flex-1 min-w-0">
                                 <p className="font-medium text-gray-900 truncate">{booking.group_name}</p>
-                                <p className="text-xs text-gray-600">{booking.status}</p>
+                                <p className="text-xs text-gray-600">{isCompleted ? 'COMPLETED' : booking.status}</p>
                               </div>
                             </div>
                             <button
@@ -1638,18 +1664,28 @@ export default function SchedulePage() {
                                 setExpandedSlot(null)
                                 setLoadingFormButton(booking.booking_id || slot.slot_id)
                                 try {
-                                  await openConsultationForm(booking)
+                                  await openConsultationForm({
+                                    ...booking,
+                                    slot_date: booking.slot_date || slot.slot_date,
+                                    slot_date_only: booking.slot_date_only || slot.slot_date_only || String(slot.slot_date || '').slice(0, 10),
+                                  })
                                 } finally {
                                   setLoadingFormButton(null)
                                 }
                               }}
-                              disabled={loadingFormButton === (booking.booking_id || slot.slot_id)}
-                              className="w-full px-3 py-1 bg-blue-600 text-white rounded text-xs font-semibold hover:bg-blue-700 disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                              disabled={isCompleted || loadingFormButton === (booking.booking_id || slot.slot_id)}
+                              className={`w-full px-3 py-1 rounded text-xs font-semibold disabled:opacity-50 disabled:cursor-not-allowed transition-colors ${
+                                isCompleted ? 'bg-gray-300 text-gray-700' : 'bg-blue-600 text-white hover:bg-blue-700'
+                              }`}
                             >
-                              {loadingFormButton === (booking.booking_id || slot.slot_id) ? 'Loading...' : 'Consultation Record'}
+                              {loadingFormButton === (booking.booking_id || slot.slot_id)
+                                ? 'Loading...'
+                                : isCompleted
+                                  ? 'Completed'
+                                  : 'Consultation Record'}
                             </button>
                           </div>
-                        ))
+                        )})
                       ) : slot.slot_type === 'SPECIFIC_GROUP' && slot.reserved_group_name ? (
                         <div className="bg-blue-50 border border-blue-200 p-3 rounded-lg">
                           <p className="text-sm font-medium text-blue-900 mb-2">Reserved: {slot.reserved_group_name}</p>

@@ -77,6 +77,17 @@ export default function GroupPage() {
         return parsed.toLocaleString();
     };
 
+    const formatTime12Hour = (value: any) => {
+        const raw = String(value || '').trim().slice(0, 5);
+        const [hRaw, mRaw] = raw.split(':');
+        const h = Number(hRaw);
+        const m = Number(mRaw);
+        if (!Number.isFinite(h) || !Number.isFinite(m)) return String(value || '-');
+        const period = h >= 12 ? 'PM' : 'AM';
+        const hour12 = h % 12 || 12;
+        return `${hour12}:${String(m).padStart(2, '0')} ${period}`;
+    };
+
     const fetchGroupData = async (token: string) => {
         try {
             console.log("DEBUG: fetchGroupData for groupId:", groupId);
@@ -250,6 +261,7 @@ export default function GroupPage() {
 
     const isLeader = membersList.some(m => m.email === user?.email && m.role === 'leader');
     const isAdmin = user?.role === 'Admin' || user?.role === 'Advisers';
+    const canUseAI = user?.role === 'Admin';
     const canCreateTasks = isLeader || isAdmin;
 
     return (
@@ -270,6 +282,7 @@ export default function GroupPage() {
                         </div>
 
                         {/* AI Action Buttons */}
+                        {canUseAI && (
                         <div className="flex gap-3">
                             <button 
                                 onClick={() => handleAIGenerate('summary')}
@@ -286,6 +299,7 @@ export default function GroupPage() {
                                 AI Insights
                             </button>
                         </div>
+                        )}
                     </div>
 
                     <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -463,7 +477,7 @@ export default function GroupPage() {
                                                             </p>
                                                             <p className="text-sm text-gray-600">
                                                                 {formatDateLabel(log.conDate || log.slot_date)}
-                                                                {log.start_time ? ` at ${log.start_time}` : ''}
+                                                                {log.start_time ? ` at ${formatTime12Hour(log.start_time)}` : ''}
                                                             </p>
                                                             {log.conMil && (
                                                                 <p className="text-xs text-gray-500 mt-1">Topic: {log.conMil}</p>
@@ -825,7 +839,7 @@ export default function GroupPage() {
                         </div>
                     )}
                 {/* AI Result Modal */}
-                {showAIModal && <AIResultModal onClose={() => setShowAIModal(false)} />}
+                {canUseAI && showAIModal && <AIResultModal onClose={() => setShowAIModal(false)} />}
                 </main>
             </div>
         </SidebarLayout>

@@ -31,6 +31,49 @@ interface ConsultationSlot {
   reserved_group_name?: string | null
 }
 
+interface GroupBooking {
+  booking_id?: number
+  slot_id: number
+  status: string
+  slot_date_only?: string
+}
+
+const getWeekMonday = (date: Date): Date => {
+  const d = new Date(date)
+  d.setHours(0, 0, 0, 0)
+  const day = d.getDay() // 0=Sun ... 6=Sat
+  const offset = day === 0 ? -6 : 1 - day
+  d.setDate(d.getDate() + offset)
+  return d
+}
+
+const getWeekKey = (dateInput: string | Date): string => {
+  const date = typeof dateInput === 'string'
+    ? new Date(`${String(dateInput).slice(0, 10)}T00:00:00`)
+    : new Date(dateInput)
+  if (Number.isNaN(date.getTime())) return ''
+  const monday = getWeekMonday(date)
+  const y = monday.getFullYear()
+  const m = String(monday.getMonth() + 1).padStart(2, '0')
+  const d = String(monday.getDate()).padStart(2, '0')
+  return `${y}-${m}-${d}`
+}
+
+const formatTime12Hour = (value: string): string => {
+  const raw = String(value || '').trim().slice(0, 5)
+  const [hRaw, mRaw] = raw.split(':')
+  const h = Number(hRaw)
+  const m = Number(mRaw)
+  if (!Number.isFinite(h) || !Number.isFinite(m)) return value
+  const period = h >= 12 ? 'PM' : 'AM'
+  const hour12 = h % 12 || 12
+  return `${hour12}:${String(m).padStart(2, '0')} ${period}`
+}
+
+const formatTimeRange12Hour = (start: string, end: string): string => {
+  return `${formatTime12Hour(start)} - ${formatTime12Hour(end)}`
+}
+
 interface UserGroup {
   smallgroupID: number | null
   bookingGroupId?: number | null
@@ -49,6 +92,7 @@ export default function BookingPage() {
   const [userGroup, setUserGroup] = useState<UserGroup | null>(null)
   const [slots, setSlots] = useState<ConsultationSlot[]>([])
   const [bookedSlots, setBookedSlots] = useState<number[]>([])
+  const [hasBookedThisWeek, setHasBookedThisWeek] = useState(false)
   const [loading, setLoading] = useState(true)
   const [selectedCourse, setSelectedCourse] = useState<string>('')
   const [courses, setCourses] = useState<any[]>([])
@@ -81,6 +125,8 @@ export default function BookingPage() {
   const fetchUserGroup = async (email: string) => {
     try {
       const token = localStorage.getItem("auth_token")
+      const enrolledCourseIds = await fetchStudentCourseIds()
+
       const res = await fetch(`${API_URL}/api/group/by-member/${email}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
@@ -89,33 +135,36 @@ export default function BookingPage() {
         const data = await res.json()
         setUserGroup(data.group)
         const normalizedEmail = String(email || '').trim().toLowerCase()
-        const backendMemberNumber = Number(data.group?.memberNumber)
-        const isLeader = String(data.group?.roleOne || '').trim().toLowerCase() === normalizedEmail
-        const isMemberOne = String(data.group?.member1 || '').trim().toLowerCase() === normalizedEmail
-        const isMemberTwo = String(data.group?.member2 || '').trim().toLowerCase() === normalizedEmail
-        const computedCanBook =
-          Boolean(data.group?.canBookConsultation) ||
-          backendMemberNumber === 1 ||
-          backendMemberNumber === 2 ||
-          isLeader ||
-          isMemberOne ||
-          isMemberTwo
+        const leaderEmail = String(data.group?.leaderEmail || data.group?.roleOne || '').trim().toLowerCase()
+        const isLeader = Boolean(data.group?.isLeader) || (leaderEmail !== '' && leaderEmail === normalizedEmail)
+        const computedCanBook = isLeader
 
         setCanBookConsultation(computedCanBook)
 
         // Load slots across all eligible courses so stale group course mappings don't hide valid slots.
         const groupCourseId = data.group?.courseID || data.group?.course_id || data.group?.courseId
         const normalizedGroupCourseId = groupCourseId ? String(groupCourseId) : ''
-
-        const enrolledCourseIds = await fetchStudentCourseIds()
         const candidateCourseIds = Array.from(
           new Set([normalizedGroupCourseId, ...enrolledCourseIds].filter(Boolean))
         )
 
-        await fetchSlotsForCourses(candidateCourseIds, data.group?.bookingGroupId || data.group?.smallgroupID)
+        await fetchSlotsForCourses(
+          candidateCourseIds,
+          data.group?.bookingGroupId || data.group?.smallgroupID,
+          data.group?.groupName
+        )
+      } else {
+        // If group lookup fails, still show available course slots for visibility.
+        await fetchSlotsForCourses(enrolledCourseIds)
       }
     } catch (err) {
       console.error('Failed to fetch user group:', err)
+      try {
+        const enrolledCourseIds = await fetchStudentCourseIds()
+        await fetchSlotsForCourses(enrolledCourseIds)
+      } catch {
+        // ignore fallback errors; loading state is handled in finally
+      }
     } finally {
       setLoading(false)
     }
@@ -139,7 +188,11 @@ export default function BookingPage() {
     }
   }
 
-  const fetchSlotsForCourses = async (courseIds: string[], groupId?: number | null) => {
+  const fetchSlotsForCourses = async (
+    courseIds: string[],
+    groupId?: number | null,
+    groupNameOverride?: string
+  ) => {
     if (!courseIds.length) {
       setSlots([])
       return
@@ -150,8 +203,11 @@ export default function BookingPage() {
       const token = localStorage.getItem("auth_token")
       const responses = await Promise.all(
         courseIds.map(async (courseId) => {
-          const groupFilter = userGroup?.groupName ? `&groupName=${encodeURIComponent(userGroup.groupName)}` : ''
-          const res = await fetch(`${API_URL}/api/consultation/slots/${courseId}?futureOnly=true${groupFilter}`, {
+          const resolvedGroupName = String(groupNameOverride || userGroup?.groupName || '').trim()
+          const resolvedGroupId = Number(groupId ?? userGroup?.bookingGroupId ?? userGroup?.smallgroupID)
+          const groupFilter = resolvedGroupName ? `&groupName=${encodeURIComponent(resolvedGroupName)}` : ''
+          const groupIdFilter = Number.isFinite(resolvedGroupId) ? `&groupId=${resolvedGroupId}` : ''
+          const res = await fetch(`${API_URL}/api/consultation/slots/${courseId}?futureOnly=true${groupFilter}${groupIdFilter}`, {
             headers: { Authorization: `Bearer ${token}` },
           })
 
@@ -174,8 +230,9 @@ export default function BookingPage() {
       setSelectedCourse(courseIds[0] || '')
 
       const effectiveGroupId = groupId ?? userGroup?.bookingGroupId ?? userGroup?.smallgroupID
+      const resolvedGroupName = String(groupNameOverride || userGroup?.groupName || '').trim()
       if (Number.isFinite(Number(effectiveGroupId))) {
-        await fetchGroupBookings(Number(effectiveGroupId))
+        await fetchGroupBookings(Number(effectiveGroupId), resolvedGroupName || undefined)
       }
     } catch (err) {
       console.error('Failed to fetch slots:', err)
@@ -184,19 +241,25 @@ export default function BookingPage() {
     }
   }
 
-  const fetchGroupBookings = async (groupId: number) => {
+  const fetchGroupBookings = async (groupId: number, groupName?: string) => {
     try {
       const token = localStorage.getItem("auth_token")
-      const res = await fetch(`${API_URL}/api/consultation/bookings/group/${groupId}`, {
+      const groupNameQuery = groupName ? `?groupName=${encodeURIComponent(groupName)}` : ''
+      const res = await fetch(`${API_URL}/api/consultation/bookings/group/${groupId}${groupNameQuery}`, {
         headers: { Authorization: `Bearer ${token}` },
       })
       
       if (res.ok) {
         const data = await res.json()
-        const bookedSlotIds = data.bookings
-          .filter((b: any) => b.status === 'BOOKED')
-          .map((b: any) => b.slot_id)
+        const bookedEntries: GroupBooking[] = (data.bookings || []).filter((b: GroupBooking) => b.status === 'BOOKED')
+        const bookedSlotIds = bookedEntries.map((b: GroupBooking) => b.slot_id)
         setBookedSlots(bookedSlotIds)
+
+        const thisWeekKey = getWeekKey(new Date())
+        const alreadyBookedThisWeek = bookedEntries.some(
+          (b: GroupBooking) => getWeekKey(b.slot_date_only || '') === thisWeekKey
+        )
+        setHasBookedThisWeek(alreadyBookedThisWeek)
       }
     } catch (err) {
       console.error('Failed to fetch bookings:', err)
@@ -205,12 +268,17 @@ export default function BookingPage() {
 
   const handleBookSlot = async (slot: ConsultationSlot) => {
     if (!canBookConsultation) {
-      setBookingError("Only the group leader, member #1, or member #2 can book consultations.")
+      setBookingError("Only the group leader can book consultations.")
       return
     }
 
     if (!userGroup) {
       setBookingError("Unable to determine your group.")
+      return
+    }
+
+    if (hasBookedThisWeek) {
+      setBookingError("Your group already has a booked consultation for this week.")
       return
     }
 
@@ -233,6 +301,7 @@ export default function BookingPage() {
       if (res.ok) {
         setBookingSuccess(`Successfully booked consultation with ${slot.adviser_name} on ${new Date(slot.slot_date).toLocaleDateString()}`)
         setBookedSlots((prev) => [...prev, slot.slot_id])
+        setHasBookedThisWeek(true)
         setSlots((prev) =>
           prev.map((s) =>
             s.slot_id === slot.slot_id
@@ -240,6 +309,18 @@ export default function BookingPage() {
               : s
           )
         )
+
+        const effectiveGroupId = userGroup.bookingGroupId ?? userGroup.smallgroupID
+        if (Number.isFinite(Number(effectiveGroupId))) {
+          await fetchGroupBookings(Number(effectiveGroupId), userGroup.groupName)
+        }
+
+        const groupCourseId = userGroup.courseID ? String(userGroup.courseID) : ''
+        const candidateCourseIds = Array.from(
+          new Set([groupCourseId, ...courses.map((course: any) => String(course.id))].filter(Boolean))
+        )
+        await fetchSlotsForCourses(candidateCourseIds, effectiveGroupId, userGroup.groupName)
+
         setTimeout(() => setBookingSuccess(''), 3000)
       } else {
         const err = await res.json()
@@ -313,7 +394,7 @@ export default function BookingPage() {
           <p className="text-gray-500 mt-1 text-sm">
             {canBookConsultation
               ? "You can book consultations for your group."
-              : "You can view available dates, but only group leader/member #1/member #2 can book consultations."}
+              : "You can view available dates, but only the group leader can book consultations."}
           </p>
         </div>
 
@@ -406,7 +487,7 @@ export default function BookingPage() {
                             <div>
                               <div className="flex items-center gap-2 text-gray-700">
                                 <Clock className="w-4 h-4 text-cyan-600" />
-                                <span className="font-medium">{slot.start_time} - {slot.end_time}</span>
+                                <span className="font-medium">{formatTimeRange12Hour(slot.start_time, slot.end_time)}</span>
                               </div>
                               <p className="text-sm text-gray-600 mt-1">
                                 Adviser: <span className="font-medium">{slot.adviser_name}</span>
@@ -435,7 +516,7 @@ export default function BookingPage() {
                               ) : available && canBookConsultation ? (
                                 <button
                                   onClick={() => handleBookSlot(slot)}
-                                  disabled={isBooking}
+                                  disabled={isBooking || hasBookedThisWeek}
                                   className="px-3 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 disabled:opacity-50 font-medium transition-colors flex items-center gap-2"
                                 >
                                   Book
@@ -443,7 +524,7 @@ export default function BookingPage() {
                                 </button>
                               ) : (
                                 <div className="px-3 py-2 bg-gray-200 text-gray-600 rounded-lg text-sm font-medium">
-                                  {available ? 'Contact Leader' : 'Full'}
+                                  {hasBookedThisWeek ? 'Booked This Week' : available ? 'Available' : 'Full'}
                                 </div>
                               )}
                             </div>

@@ -20,6 +20,7 @@ import {
 import { jwtDecode } from 'jwt-decode';
 import ThemeToggle from './shared/ThemeToggle';
 import { useTheme } from '@/contexts/ThemeContext';
+import { API_URL } from '@/lib/api';
 
 export default function SidebarLayout({ children }: { children: React.ReactNode }) {
     const [isSidebarOpen, setIsSidebarOpen] = useState(true);
@@ -27,6 +28,7 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
     const [isAdmin, setIsAdmin] = useState(false);
     const [userRole, setUserRole] = useState('');
     const [userEmail, setUserEmail] = useState('');
+    const [userName, setUserName] = useState('');
     const pathname = usePathname();
     const router = useRouter();
     const { toggleMode, setRole } = useTheme();
@@ -36,18 +38,47 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         if (token) {
             try {
                 const decoded: any = jwtDecode(token);
-                setIsAdmin(decoded.role === 'Admin');
-                setUserRole(decoded.role || '');
                 setUserEmail(decoded.email || '');
+                setUserName(decoded.name || '');
+                setUserRole(decoded.role || '');
+                setIsAdmin(decoded.role === 'Admin');
                 
                 // Set theme role based on user's accountRole
                 if (decoded.role === 'Admin') {
                     setRole('admin');
-                } else if (decoded.role === 'Adviser') {
+                } else if (decoded.role === 'Adviser' || decoded.role === 'Advisers') {
                     setRole('manager');
                 } else {
                     setRole('member');
                 }
+
+                // Refresh profile from backend so role updates are reflected without re-login
+                fetch(`${API_URL}/api/me`, {
+                    headers: { Authorization: `Bearer ${token}` }
+                })
+                    .then(async (res) => {
+                        if (!res.ok) return null;
+                        return res.json();
+                    })
+                    .then((profile) => {
+                        if (!profile) return;
+                        const refreshedRole = String(profile.role || decoded.role || '');
+                        setUserRole(refreshedRole);
+                        setIsAdmin(refreshedRole === 'Admin');
+                        setUserEmail(String(profile.email || decoded.email || ''));
+                        setUserName(String(profile.name || decoded.name || ''));
+
+                        if (refreshedRole === 'Admin') {
+                            setRole('admin');
+                        } else if (refreshedRole === 'Adviser' || refreshedRole === 'Advisers') {
+                            setRole('manager');
+                        } else {
+                            setRole('member');
+                        }
+                    })
+                    .catch(() => {
+                        // keep decoded token fallback
+                    });
             } catch (e) {
                 console.error('Failed to decode token:', e);
             }
@@ -59,12 +90,14 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
         router.push('/login');
     };
 
+    const normalizedRole = String(userRole || '').toLowerCase();
+
     const navItems = [
         { href: '/dashboard', label: 'Dashboard', icon: LayoutDashboard },
         { href: '/courses', label: 'Courses', icon: FolderKanban },
         { href: '/calendar', label: 'Calendar', icon: Calendar },
-        { href: '/workspace-sync', label: 'Workspace Sync', icon: RefreshCw },
-        ...(userRole === 'Adviser' || userRole === 'Admin' ? [{ href: '/schedule', label: 'My Schedule', icon: Calendar }] : []),
+        ...(userRole === 'Admin' ? [{ href: '/workspace-sync', label: 'Workspace Sync', icon: RefreshCw }] : []),
+        ...(normalizedRole === 'admin' || normalizedRole === 'adviser' || normalizedRole === 'advisers' ? [{ href: '/schedule', label: 'My Schedule', icon: Calendar }] : []),
         ...(userRole === 'Student' ? [{ href: '/booking', label: 'Booking', icon: Calendar }] : []),
     ];
 
@@ -136,8 +169,8 @@ export default function SidebarLayout({ children }: { children: React.ReactNode 
                         {/* Desktop Header Actions */}
                         <div className="hidden md:flex items-center gap-6">
                             <div className="flex flex-col items-end">
-                                <p className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>{userEmail.split('@')[0] || 'User'}</p>
-                                <p className="text-xs" style={{ color: 'var(--color-textSecondary)' }}>{isAdmin ? 'Admin' : 'Student'}</p>
+                                <p className="text-sm font-semibold" style={{ color: 'var(--color-text)' }}>{userName || userEmail.split('@')[0] || 'User'}</p>
+                                <p className="text-xs" style={{ color: 'var(--color-textSecondary)' }}>{userRole || (isAdmin ? 'Admin' : 'Student')}</p>
                             </div>
                             <ThemeToggle />
                             <button 
